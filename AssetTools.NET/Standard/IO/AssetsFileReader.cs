@@ -118,7 +118,6 @@ namespace AssetsTools.NET
             {
                 ms.WriteByte(curByte);
             }
-
             return Encoding.UTF8.GetString(ms.ToArray());
         }
         public static string ReadNullTerminatedArray(byte[] bytes, uint pos)

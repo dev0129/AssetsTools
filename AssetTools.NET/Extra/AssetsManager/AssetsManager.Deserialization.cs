@@ -1,5 +1,5 @@
 ﻿using System;
-using System.IO;
+using System.Collections.Generic;
 
 namespace AssetsTools.NET.Extra
 {
@@ -13,7 +13,7 @@ namespace AssetsTools.NET.Extra
             }
 
             refMan = new RefTypeManager();
-            refMan.FromTypeTree(inst.file.Metadata, typeTreeBlobs);
+            refMan.FromTypeTree(inst.file.Metadata);
 
             if (MonoTempGenerator != null)
             {
@@ -192,7 +192,7 @@ namespace AssetsTools.NET.Extra
                         return baseField;
                     }
 
-                    ConcurrentDictionary<long, AssetTypeTemplateField> templates = null;
+                    Dictionary<long, AssetTypeTemplateField> templates = null;
                     if (UseMonoTemplateFieldCache)
                     {
                         if (monoCldbTemplateFieldCache.TryGetValue(monoScriptFile, out templates))

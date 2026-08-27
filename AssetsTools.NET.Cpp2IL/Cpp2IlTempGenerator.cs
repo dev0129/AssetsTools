@@ -358,7 +358,7 @@ namespace AssetsTools.NET.Cpp2IL
         private List<Il2CppFieldDefinition> GetAcceptableFields(TypeDefWithSelfRef parentType, int availableDepth)
         {
             List<Il2CppFieldDefinition> validFields = new List<Il2CppFieldDefinition>();
-            for (int i = 0; i < parentType.typeDef.FieldCount; i++)
+            for (int i = 0; i < parentType.typeDef.field_count; i++)
             {
                 Il2CppFieldDefinition f = parentType.typeDef.Fields[i];
                 FieldAttributes attr = parentType.typeDef.FieldAttributes[i];
@@ -389,8 +389,7 @@ namespace AssetsTools.NET.Cpp2IL
                             {
                                 continue;
                             }
-                            // resolidify type
-                            solidifiedFieldType = parentType.SolidifyType(elemType);
+                            solidifiedFieldType = elemType;
                         }
                         // unity doesn't serialize a field of the same type as declaring type
                         // unless it inherits from UnityEngine.Object
@@ -427,7 +426,7 @@ namespace AssetsTools.NET.Cpp2IL
 
             bool IsValidDef(List<string> attributeNames, TypeDefWithSelfRef typeDef, int availableDepth)
             {
-                // before 2020.1.0 you couldn't have fields of a generic type, so they should be ignored
+                // before 2020.1.0 you couldn't have fields of a generic type, so they should be ingored
                 // https://unity.com/releases/editor/whats-new/2020.1.0
                 if (typeDef.typeDef.GenericContainer != null && _unityVersion.major < 2020)
                 {
@@ -448,7 +447,7 @@ namespace AssetsTools.NET.Cpp2IL
                 }
 
 
-                TypeAttributes typeAttrs = (TypeAttributes)typeDef.typeDef.Flags;
+                TypeAttributes typeAttrs = (TypeAttributes)typeDef.typeDef.flags;
                 // value types are not affected by the serialization limit
                 if (availableDepth < 0)
                 {

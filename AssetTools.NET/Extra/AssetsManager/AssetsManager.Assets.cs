@@ -17,37 +17,19 @@ namespace AssetsTools.NET.Extra
                 LoadBundleDependencies(fileInst, bunInst, Path.GetDirectoryName(path));
         }
 
-        private AssetsFileInstance LoadAssetsFileCacheless(AssetsFile file, string path, bool loadDeps, BundleFileInstance bunInst = null)
-        {
-            AssetsFileInstance fileInst = new AssetsFileInstance(file, path);
-            fileInst.parentBundle = bunInst;
-            return LoadAssetsFileCacheless(fileInst, path, loadDeps, bunInst);
-        }
-
         private AssetsFileInstance LoadAssetsFileCacheless(Stream stream, string path, bool loadDeps, BundleFileInstance bunInst = null)
         {
             AssetsFileInstance fileInst = new AssetsFileInstance(stream, path);
             fileInst.parentBundle = bunInst;
-            return LoadAssetsFileCacheless(fileInst, path, loadDeps, bunInst);
-        }
 
-        private AssetsFileInstance LoadAssetsFileCacheless(AssetsFileInstance fileInst, string path, bool loadDeps, BundleFileInstance bunInst = null)
-        {
             string lookupKey = GetFileLookupKey(path);
-            lock (FileLookup)
-            {
-                lock (Files)
-                {
-                    FileLookup[lookupKey] = fileInst;
-                    Files.Add(fileInst);
-                }
-            }
+            FileLookup[lookupKey] = fileInst;
+            Files.Add(fileInst);
 
             if (loadDeps)
             {
                 LoadAssetsFileDependencies(fileInst, path, bunInst);
             }
-            // not thread safe
             if (UseQuickLookup)
             {
                 fileInst.file.GenerateQuickLookup();
@@ -76,12 +58,10 @@ namespace AssetsTools.NET.Extra
                 }
                 return fileInst;
             }
-
-            if (stream != null)
+            else
             {
                 return LoadAssetsFileCacheless(stream, path, loadDeps, bunInst);
             }
-            return null;
         }
 
         /// <summary>
@@ -101,35 +81,11 @@ namespace AssetsTools.NET.Extra
         /// Load an <see cref="AssetsFileInstance"/> from a path.
         /// If a file with that name is already loaded, it will be returned instead.
         /// </summary>
-        /// <param name="path">The path of the file to read from.</param>
-        /// <param name="loadDeps">Load all dependencies immediately?</param>
-        /// <returns>The loaded <see cref="AssetsFileInstance"/>.</returns>
-        public AssetsFileInstance LoadAssetsFile(string path, bool loadDeps = false)
-        {
-            string lookupKey = GetFileLookupKey(path);
-            if (FileLookup.TryGetValue(lookupKey, out AssetsFileInstance fileInst))
-            {
-                if (loadDeps)
-                {
-                    LoadAssetsFileDependencies(fileInst, path, null);
-                }
-                return fileInst;
-            }
-
-            FileStream stream = File.OpenRead(path);
-            return LoadAssetsFileCacheless(stream, stream.Name, loadDeps);
-        }
-
-
-        /// <summary>
-        /// Load an <see cref="AssetsFileInstance"/> from an existing loaded <see cref="AssetsFile"/>.
-        /// If a file with that name is already loaded, it will be returned instead.
-        /// </summary>
         /// <param name="file">The assets file to use.</param>
         /// <param name="path">The path of the file to read from.</param>
         /// <param name="loadDeps">Load all dependencies immediately?</param>
         /// <returns>The loaded <see cref="AssetsFileInstance"/>.</returns>
-        public AssetsFileInstance AddAssetsFile(AssetsFile file, string path, bool loadDeps = false)
+        public AssetsFileInstance LoadAssetsFile(string path, bool loadDeps = false)
         {
             string lookupKey = GetFileLookupKey(path);
             if (FileLookup.TryGetValue(lookupKey, out AssetsFileInstance fileInst))

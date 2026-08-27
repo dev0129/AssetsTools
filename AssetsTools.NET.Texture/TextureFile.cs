@@ -441,19 +441,8 @@ namespace AssetsTools.NET.Texture
         /// <param name="mipCount">The number of mips encoded in the encoded texture data.</param>
         public void SetPictureData(byte[] encodedData, int width, int height, TextureFormat textureFormat = 0, int mipCount = 1)
         {
-            if (textureFormat != 0)
-            {
-                m_TextureFormat = (int)textureFormat;
-            }
-
-            // pad width and height based on texture format.
-            // native encoder pads to the correct size but does not
-            // report the padded size. here we calculate it again and
-            // set the correct width and height.
-            var paddedSize = TextureOperations.GetPaddedTextureSize(textureFormat, width, height);
-            m_Width = paddedSize.Width;
-            m_Height = paddedSize.Height;
-
+            m_Width = width;
+            m_Height = height;
             m_StreamData.path = "";
             m_StreamData.offset = 0;
             m_StreamData.size = 0;

@@ -184,9 +184,15 @@ namespace AssetsTools.NET
             // write the updated directory infos
             for (int i = 0; i < dirInfos.Count; i++)
             {
-                AssetBundleDirectoryInfo dirInfo = dirInfos[i];
-                long startPosition = writer.Position;
-                long newOffset = startPosition - assetDataPos;
+                AssetBundleDirectoryInfo info = dirInfos[i];
+                BundleReplacer replacer = replacers.FirstOrDefault(n => n.GetEntryName() == info.Name);
+                if (replacer != null && replacer.GetReplacementType() != BundleReplacementType.Rename)
+                {
+                    if (replacer.GetReplacementType() == BundleReplacementType.AddOrModify)
+                    {
+                        long startPos = writer.Position;
+                        long endPos = replacer.Write(writer);
+                        long size = endPos - startPos;
 
                 ContentReplacerType replacerType = dirInfo.ReplacerType;
                 if (replacerType == ContentReplacerType.AddOrModify)

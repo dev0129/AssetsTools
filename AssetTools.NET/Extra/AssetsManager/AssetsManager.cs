@@ -16,9 +16,6 @@ namespace AssetsTools.NET.Extra
         /// Cache managed reference type template fields
         /// </summary>
         public bool UseRefTypeManagerCache { get; set; } = false;
-        /// <summary>
-        /// Use a dictionary to look up asset infos rather than a simple sequential search
-        /// </summary>
         public bool UseQuickLookup { get; set; } = false;
 
         public ClassDatabaseFile ClassDatabase { get; private set; }

@@ -297,8 +297,7 @@ namespace AssetsTools.NET.Extra
                             {
                                 continue;
                             }
-                            // resolidify type
-                            solidifiedFieldType = parentType.SolidifyType(elemType);
+                            solidifiedFieldType = elemType;
                         }
                         // unity doesn't serialize a field of the same type as declaring type
                         // unless it inherits from UnityEngine.Object

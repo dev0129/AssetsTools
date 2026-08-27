@@ -1,9 +1,8 @@
 ﻿using AssetsTools.NET.Extra;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
-using System.Security.Cryptography;
+using System.Runtime.CompilerServices;
 
 namespace AssetsTools.NET
 {
@@ -34,35 +33,58 @@ namespace AssetsTools.NET
         /// </summary>
         public bool HasValue { get; set; }
         /// <summary>
+        /// Version of the field. This value is updated when the type changes across engine versions.
+        /// </summary>
+        public ushort Version { get; set; }
+        /// <summary>
         /// Children of the field.
         /// </summary>
         public List<AssetTypeTemplateField> Children { get; set; }
 
         /// <summary>
         /// Read the template field from a type tree type.
+        /// This function will not do anything if there is no type information.
         /// </summary>
         /// <param name="typeTreeType">The type tree type to read from.</param>
         public void FromTypeTree(TypeTreeType typeTreeType)
         {
+            TypeTreeBlob typeTreeBlob = typeTreeType.TypeBlob;
+
+            // if we're using external types and this is not a definition,
+            // there is no data for us to read, we just have to bail now.
+            if (typeTreeBlob != null && !typeTreeType.TypeBlobIsDefinition)
+                return;
+
             int fieldIndex = 0;
-            FromTypeTree(typeTreeType, ref fieldIndex);
+            FromTypeTree(typeTreeBlob, ref fieldIndex);
         }
 
-        private void FromTypeTree(TypeTreeType typeTreeType, ref int fieldIndex)
+        /// <summary>
+        /// Read the template field from a type tree blob.
+        /// </summary>
+        /// <param name="typeTreeBlob">The type tree blob to read from.</param>
+        public void FromTypeBlob(TypeTreeBlob typeTreeBlob)
         {
-            TypeTreeNode field = typeTreeType.Nodes[fieldIndex];
-            Name = field.GetNameString(typeTreeType.StringBuffer);
-            Type = field.GetTypeString(typeTreeType.StringBuffer);
+            int fieldIndex = 0;
+            FromTypeTree(typeTreeBlob, ref fieldIndex);
+        }
+
+        private void FromTypeTree(TypeTreeBlob typeTreeBlob, ref int fieldIndex)
+        {
+            TypeTreeNode field = typeTreeBlob.Nodes[fieldIndex];
+            Name = field.GetNameString(typeTreeBlob.StringBufferBytes);
+            Type = field.GetTypeString(typeTreeBlob.StringBufferBytes);
             ValueType = AssetTypeValueField.GetValueTypeByTypeName(Type);
             IsArray = Net35Polyfill.HasFlag(field.TypeFlags, TypeTreeNodeFlags.Array);
             IsAligned = (field.MetaFlags & 0x4000) != 0;
             HasValue = ValueType != AssetValueType.None;
+            Version = field.Version;
 
             Children = new List<AssetTypeTemplateField>();
 
-            for (fieldIndex++; fieldIndex < typeTreeType.Nodes.Count; fieldIndex++)
+            for (fieldIndex++; fieldIndex < typeTreeBlob.Nodes.Count; fieldIndex++)
             {
-                TypeTreeNode typeTreeField = typeTreeType.Nodes[fieldIndex];
+                TypeTreeNode typeTreeField = typeTreeBlob.Nodes[fieldIndex];
                 if (typeTreeField.Level <= field.Level)
                 {
                     fieldIndex--;
@@ -70,7 +92,7 @@ namespace AssetsTools.NET
                 }
 
                 AssetTypeTemplateField assetField = new AssetTypeTemplateField();
-                assetField.FromTypeTree(typeTreeType, ref fieldIndex);
+                assetField.FromTypeTree(typeTreeBlob, ref fieldIndex);
                 Children.Add(assetField);
             }
 
@@ -78,10 +100,8 @@ namespace AssetsTools.NET
             // (ExposedReferenceTable field in PlayableDirector class before 2018.4.25)
             if (ValueType == AssetValueType.String && !Children[0].IsArray && Children[0].ValueType != AssetValueType.None)
             {
-                Type = Children[0].Type;
-                ValueType = Children[0].ValueType;
-
-                Children.Clear();
+                Type = "_string";
+                ValueType = AssetValueType.None;
             }
 
             if (IsArray)
@@ -123,6 +143,7 @@ namespace AssetsTools.NET
             IsArray = node.TypeFlags == 1;
             IsAligned = (node.MetaFlag & 0x4000) != 0;
             HasValue = ValueType != AssetValueType.None;
+            Version = node.Version;
 
             Children = new List<AssetTypeTemplateField>(node.Children.Count);
             foreach (ClassDatabaseTypeNode childNode in node.Children)
@@ -136,11 +157,8 @@ namespace AssetsTools.NET
             // (ExposedReferenceTable field in PlayableDirector class before 2018.4.25)
             if (ValueType == AssetValueType.String && !Children[0].IsArray && Children[0].ValueType != AssetValueType.None)
             {
-                Type = Children[0].Type;
-                ValueType = Children[0].ValueType;
-
-                Children.Clear();
-                Children.TrimExcess();
+                Type = "_string";
+                ValueType = AssetValueType.None;
             }
 
             if (IsArray)
@@ -256,102 +274,7 @@ namespace AssetsTools.NET
                 }
                 else
                 {
-                    if (type == AssetValueType.String)
-                    {
-                        valueField.Children = new List<AssetTypeValueField>(0);
-                        int length = reader.ReadInt32();
-                        valueField.Value = new AssetTypeValue(reader.ReadBytes(length), true);
-                        reader.Align();
-                    }
-                    else if (type == AssetValueType.ManagedReferencesRegistry)
-                    {
-                        // todo: error handling like in array
-                        if (refMan == null)
-                            throw new Exception("refMan MUST be set to deserialize objects with ref types!");
-
-                        valueField.Children = new List<AssetTypeValueField>(0);
-                        ManagedReferencesRegistry registry = new ManagedReferencesRegistry();
-                        valueField.Value = new AssetTypeValue(registry);
-                        int registryChildCount = valueField.TemplateField.Children.Count;
-                        if (registryChildCount != 2)
-                            throw new Exception($"Expected ManagedReferencesRegistry to have two children, found {registryChildCount} instead!");
-
-                        registry.version = reader.ReadInt32();
-                        registry.references = new List<AssetTypeReferencedObject>(0);
-
-                        if (registry.version == 1)
-                        {
-                            while (true)
-                            {
-                                var refdObject = MakeReferencedObject(reader, registry.version, registry.references.Count, refMan);
-                                if (refdObject.type.Equals(AssetTypeReference.TERMINUS))
-                                {
-                                    break;
-                                }
-                                registry.references.Add(refdObject);
-                            }
-                        }
-                        else
-                        {
-                            int childCount = reader.ReadInt32();
-                            for (int i = 0; i < childCount; i++)
-                            {
-                                var refdObject = MakeReferencedObject(reader, registry.version, i, refMan);
-                                registry.references.Add(refdObject);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        int childCount = valueField.TemplateField.Children.Count;
-                        if (childCount == 0)
-                        {
-                            valueField.Children = new List<AssetTypeValueField>(0);
-                            switch (valueField.TemplateField.ValueType)
-                            {
-                                case AssetValueType.Int8:
-                                    valueField.Value = new AssetTypeValue(reader.ReadSByte());
-                                    break;
-                                case AssetValueType.UInt8:
-                                    valueField.Value = new AssetTypeValue(reader.ReadByte());
-                                    break;
-                                case AssetValueType.Bool:
-                                    valueField.Value = new AssetTypeValue(reader.ReadBoolean());
-                                    break;
-                                case AssetValueType.Int16:
-                                    valueField.Value = new AssetTypeValue(reader.ReadInt16());
-                                    break;
-                                case AssetValueType.UInt16:
-                                    valueField.Value = new AssetTypeValue(reader.ReadUInt16());
-                                    break;
-                                case AssetValueType.Int32:
-                                    valueField.Value = new AssetTypeValue(reader.ReadInt32());
-                                    break;
-                                case AssetValueType.UInt32:
-                                    valueField.Value = new AssetTypeValue(reader.ReadUInt32());
-                                    break;
-                                case AssetValueType.Int64:
-                                    valueField.Value = new AssetTypeValue(reader.ReadInt64());
-                                    break;
-                                case AssetValueType.UInt64:
-                                    valueField.Value = new AssetTypeValue(reader.ReadUInt64());
-                                    break;
-                                case AssetValueType.Float:
-                                    valueField.Value = new AssetTypeValue(reader.ReadSingle());
-                                    break;
-                                case AssetValueType.Double:
-                                    valueField.Value = new AssetTypeValue(reader.ReadDouble());
-                                    break;
-                            }
-
-                            if (valueField.TemplateField.IsAligned)
-                                reader.Align();
-                        }
-                        else if (valueField.TemplateField.ValueType != AssetValueType.None)
-                        {
-                            throw new Exception("Cannot read value of field with children!");
-                        }
-                    }
+                    ReadPrimitiveType(reader, valueField, type, refMan);
                 }
 
             }
@@ -359,12 +282,188 @@ namespace AssetsTools.NET
         }
 
         /// <summary>
-        /// Clone the field.
+        /// Deserialize a single primtive field and its children.
+        /// This method only works for strings, numbers, and ManagedReferencesRegistry.
+        /// </summary>
+        /// <param name="reader">The reader to use.</param>
+        /// <param name="valueField">The empty base value field to use.</param>
+        /// <param name="type">The value type of the template field.</param>
+        /// <param name="refMan">The ref type manager to use, if reading a MonoBehaviour using a ref type.</param>
+        /// <returns>The deserialized base field.</returns>
+#if NETSTANDARD2_0_OR_GREATER
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+#endif
+        public void ReadPrimitiveType(AssetsFileReader reader, AssetTypeValueField valueField, AssetValueType type, RefTypeManager refMan)
+        {
+            if (type == AssetValueType.String)
+            {
+                valueField.Children = new List<AssetTypeValueField>(0);
+                int length = reader.ReadInt32();
+                valueField.Value = new AssetTypeValue(reader.ReadBytes(length), true);
+                reader.Align();
+            }
+            else if (type == AssetValueType.ManagedReferencesRegistry)
+            {
+                ReadManagedReferencesRegistryType(reader, valueField, refMan);
+            }
+            else
+            {
+                int childCount = valueField.TemplateField.Children.Count;
+                if (childCount == 0)
+                {
+                    valueField.Children = new List<AssetTypeValueField>(0);
+                    switch (type)
+                    {
+                        case AssetValueType.Int8:
+                            valueField.Value = new AssetTypeValue(reader.ReadSByte());
+                            break;
+                        case AssetValueType.UInt8:
+                            valueField.Value = new AssetTypeValue(reader.ReadByte());
+                            break;
+                        case AssetValueType.Bool:
+                            valueField.Value = new AssetTypeValue(reader.ReadBoolean());
+                            break;
+                        case AssetValueType.Int16:
+                            valueField.Value = new AssetTypeValue(reader.ReadInt16());
+                            break;
+                        case AssetValueType.UInt16:
+                            valueField.Value = new AssetTypeValue(reader.ReadUInt16());
+                            break;
+                        case AssetValueType.Int32:
+                            valueField.Value = new AssetTypeValue(reader.ReadInt32());
+                            break;
+                        case AssetValueType.UInt32:
+                            valueField.Value = new AssetTypeValue(reader.ReadUInt32());
+                            break;
+                        case AssetValueType.Int64:
+                            valueField.Value = new AssetTypeValue(reader.ReadInt64());
+                            break;
+                        case AssetValueType.UInt64:
+                            valueField.Value = new AssetTypeValue(reader.ReadUInt64());
+                            break;
+                        case AssetValueType.Float:
+                            valueField.Value = new AssetTypeValue(reader.ReadSingle());
+                            break;
+                        case AssetValueType.Double:
+                            valueField.Value = new AssetTypeValue(reader.ReadDouble());
+                            break;
+                    }
+
+                    if (valueField.TemplateField.IsAligned)
+                        reader.Align();
+                }
+                else if (type != AssetValueType.None)
+                {
+                    throw new Exception("Cannot read value of field with children!");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Deserialize a ManagedReferencesRegistry field.
+        /// </summary>
+        /// <param name="reader">The reader to use.</param>
+        /// <param name="valueField">The empty base value field to use.</param>
+        /// <param name="refMan">The ref type manager to use, if reading a MonoBehaviour using a ref type.</param>
+        /// <returns>The deserialized base field.</returns>
+        public void ReadManagedReferencesRegistryType(AssetsFileReader reader, AssetTypeValueField valueField, RefTypeManager refMan)
+        {
+            if (refMan == null)
+                throw new Exception($"{nameof(refMan)} must be non-null to deserialize objects with ref types.");
+
+            valueField.Children = new List<AssetTypeValueField>(0);
+            ManagedReferencesRegistry registry = new ManagedReferencesRegistry();
+            valueField.Value = new AssetTypeValue(registry);
+            int registryChildCount = valueField.TemplateField.Children.Count;
+            if (registryChildCount != 2)
+                throw new Exception($"Expected ManagedReferencesRegistry to have two children, found {registryChildCount} instead!");
+
+            registry.version = reader.ReadInt32();
+            registry.references = new List<AssetTypeReferencedObject>();
+
+            if (registry.version == 1)
+            {
+                while (true)
+                {
+                    // rid is consecutive starting at 0
+                    var refdObject = MakeReferencedObject(reader, registry.version, registry.references.Count, refMan);
+                    if (refdObject.type.Equals(AssetTypeReference.TERMINUS))
+                    {
+                        break;
+                    }
+                    registry.references.Add(refdObject);
+                }
+            }
+            else
+            {
+                int childCount = reader.ReadInt32();
+                for (int i = 0; i < childCount; i++)
+                {
+                    // rid is read from data
+                    var refdObject = MakeReferencedObject(reader, registry.version, -1, refMan);
+                    registry.references.Add(refdObject);
+                }
+            }
+        }
+
+        public AssetTypeTemplateField this[string name]
+        {
+            get
+            {
+                if (name.Contains("."))
+                {
+                    string[] splitNames = name.Split('.');
+                    AssetTypeTemplateField field = this;
+                    foreach (string splitName in splitNames)
+                    {
+                        bool foundChild = false;
+
+                        foreach (AssetTypeTemplateField child in field.Children)
+                        {
+                            if (child.Name == splitName)
+                            {
+                                foundChild = true;
+                                field = child;
+                                break;
+                            }
+                        }
+
+                        if (!foundChild)
+                        {
+                            return null;
+                        }
+                    }
+                    return field;
+                }
+                else
+                {
+                    foreach (AssetTypeTemplateField child in Children)
+                    {
+                        if (child.Name == name)
+                        {
+                            return child;
+                        }
+                    }
+                    return null;
+                }
+            }
+        }
+
+        public AssetTypeTemplateField this[int index]
+        {
+            get
+            {
+                return Children[index];
+            }
+        }
+
+        /// <summary>
+        /// Perform a deep clone of the <see cref="AssetTypeTemplateField"/>.
         /// </summary>
         /// <returns>The cloned field.</returns>
         public AssetTypeTemplateField Clone()
         {
-            var clone = new AssetTypeTemplateField
+            return new AssetTypeTemplateField
             {
                 Name = Name,
                 Type = Type,
@@ -374,7 +473,6 @@ namespace AssetsTools.NET
                 HasValue = HasValue,
                 Children = Children.Select(c => c.Clone()).ToList()
             };
-            return clone;
         }
 
         private AssetTypeReferencedObject MakeReferencedObject(AssetsFileReader reader, int registryVersion, int referenceIndex, RefTypeManager refMan)
@@ -397,11 +495,11 @@ namespace AssetsTools.NET
             AssetTypeTemplateField objectTempField = refMan.GetTemplateField(refType);
             if (objectTempField != null)
             {
-                refdObject.data = new AssetTypeValueField()
+                AssetTypeValueField tempField = new AssetTypeValueField()
                 {
                     TemplateField = objectTempField
                 };
-                refdObject.data = ReadType(reader, refdObject.data, refMan);
+                refdObject.data = ReadType(reader, tempField, refMan);
             }
             else
             {

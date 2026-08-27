@@ -1,6 +1,5 @@
 ﻿using Mono.Cecil;
 using Mono.Cecil.Rocks;
-using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,7 +9,6 @@ namespace AssetsTools.NET.Extra
     public class MonoCecilTempGenerator : IMonoBehaviourTemplateGenerator
     {
         private UnityVersion unityVersion;
-        private bool anyFieldIsManagedReference;
 
         public string managedPath;
         public Dictionary<string, AssemblyDefinition> loadedAssemblies = new Dictionary<string, AssemblyDefinition>();
@@ -22,12 +20,15 @@ namespace AssetsTools.NET.Extra
 
         public void Dispose()
         {
-            foreach (AssemblyDefinition assembly in loadedAssemblies.Values)
+            lock (loadedAssemblies)
             {
-                assembly.Dispose();
-            }
+                foreach (AssemblyDefinition assembly in loadedAssemblies.Values)
+                {
+                    assembly.Dispose();
+                }
 
-            loadedAssemblies.Clear();
+                loadedAssemblies.Clear();
+            }
         }
 
         public AssetTypeTemplateField GetTemplateField(AssetTypeTemplateField baseField, string assemblyName, string nameSpace, string className, UnityVersion unityVersion)
@@ -61,19 +62,32 @@ namespace AssetsTools.NET.Extra
         public List<AssetTypeTemplateField> Read(AssemblyDefinition assembly, string nameSpace, string typeName, UnityVersion unityVersion)
         {
             this.unityVersion = unityVersion;
-            anyFieldIsManagedReference = false;
+            bool usingManagedReference = false;
             List<AssetTypeTemplateField> children = new List<AssetTypeTemplateField>();
 
-            RecursiveTypeLoad(assembly.MainModule, nameSpace, typeName, children, CommonMonoTemplateHelper.GetSerializationLimit(unityVersion));
+            RecursiveTypeLoad(
+                assembly.MainModule, nameSpace, typeName, children,
+                CommonMonoTemplateHelper.GetSerializationLimit(unityVersion), ref usingManagedReference);
+
+            if (usingManagedReference)
+            {
+                children.Add(CommonMonoTemplateHelper.ManagedReferencesRegistry("references", unityVersion));
+            }
+
             return children;
         }
 
         private AssemblyDefinition GetAssemblyWithDependencies(string path)
         {
             string assemblyName = Path.GetFileName(path);
-            if (loadedAssemblies.ContainsKey(assemblyName))
+            lock (loadedAssemblies)
             {
-                return loadedAssemblies[assemblyName];
+                if (loadedAssemblies.ContainsKey(assemblyName))
+                {
+                    return loadedAssemblies[assemblyName];
+                }
+
+                loadedAssemblies[assemblyName] = null;
             }
 
             DefaultAssemblyResolver resolver = new DefaultAssemblyResolver();
@@ -85,12 +99,17 @@ namespace AssetsTools.NET.Extra
             };
 
             AssemblyDefinition asmDef = AssemblyDefinition.ReadAssembly(path, readerParameters);
-            loadedAssemblies[assemblyName] = asmDef;
+            lock (loadedAssemblies)
+            {
+                loadedAssemblies[assemblyName] = asmDef;
+            }
 
             return asmDef;
         }
 
-        private void RecursiveTypeLoad(ModuleDefinition module, string nameSpace, string typeName, List<AssetTypeTemplateField> attf, int availableDepth)
+        private void RecursiveTypeLoad(
+            ModuleDefinition module, string nameSpace, string typeName, List<AssetTypeTemplateField> attf,
+            int availableDepth, ref bool usingManagedReference)
         {
             // TypeReference needed for TypeForwardedTo in UnityEngine (and others)
             TypeReference typeRef;
@@ -115,10 +134,12 @@ namespace AssetsTools.NET.Extra
                 type = typeRef.Resolve();
             }
 
-            RecursiveTypeLoad(type, attf, availableDepth, true);
+            RecursiveTypeLoad(type, attf, availableDepth, true, ref usingManagedReference);
         }
 
-        private void RecursiveTypeLoad(TypeDefWithSelfRef type, List<AssetTypeTemplateField> attf, int availableDepth, bool isRecursiveCall = false)
+        private void RecursiveTypeLoad(
+            TypeDefWithSelfRef type, List<AssetTypeTemplateField> attf, int availableDepth,
+            bool isRecursiveCall, ref bool usingManagedReference)
         {
             if (!isRecursiveCall)
             {
@@ -133,13 +154,13 @@ namespace AssetsTools.NET.Extra
             {
                 TypeDefWithSelfRef typeDef = type.typeDef.BaseType;
                 typeDef.AssignTypeParams(type);
-                RecursiveTypeLoad(typeDef, attf, availableDepth, true);
+                RecursiveTypeLoad(typeDef, attf, availableDepth, true, ref usingManagedReference);
             }
 
-            attf.AddRange(ReadTypes(type, availableDepth));
+            attf.AddRange(ReadTypes(type, availableDepth, ref usingManagedReference));
         }
 
-        private List<AssetTypeTemplateField> ReadTypes(TypeDefWithSelfRef type, int availableDepth)
+        private List<AssetTypeTemplateField> ReadTypes(TypeDefWithSelfRef type, int availableDepth, ref bool usingManagedReference)
         {
             List<FieldDefinition> acceptableFields = GetAcceptableFields(type, availableDepth);
             List<AssetTypeTemplateField> localChildren = new List<AssetTypeTemplateField>();
@@ -153,16 +174,23 @@ namespace AssetsTools.NET.Extra
                 bool isPrimitive = false;
                 bool derivesFromUEObject = false;
                 bool isManagedReference = false;
+                bool isString = false;
 
                 if (fieldTypeDef.typeRef.MetadataType == MetadataType.Array)
                 {
                     ArrayType arrType = (ArrayType)fieldTypeDef.typeRef;
-                    isArrayOrList = arrType.IsVector;
+                    isArrayOrList = arrType.IsVector; // isn't this always true?
+                    if (isArrayOrList)
+                    {
+                        // resolidify the type to match the actual element
+                        // back to its original type if it's a generic one
+                        fieldTypeDef = type.SolidifyType(arrType.ElementType);
+                    }
                 }
                 else if (fieldTypeDef.typeDef.FullName == "System.Collections.Generic.List`1")
                 {
-                    fieldTypeDef = fieldTypeDef.typeParamToArg.First().Value;
                     isArrayOrList = true;
+                    fieldTypeDef = fieldTypeDef.typeParamToArg.First().Value;
                 }
 
                 field.Name = fieldDef.Name;
@@ -175,7 +203,7 @@ namespace AssetsTools.NET.Extra
                 {
                     field.Type = CommonMonoTemplateHelper.ConvertBaseToPrimitive(fieldTypeDef.typeDef.FullName);
                 }
-                else if (fieldTypeDef.typeDef.FullName == "System.String")
+                else if (isString = fieldTypeDef.typeDef.FullName == "System.String")
                 {
                     field.Type = "string";
                 }
@@ -185,7 +213,7 @@ namespace AssetsTools.NET.Extra
                 }
                 else if (isManagedReference = fieldDef.CustomAttributes.Any(a => a.AttributeType.Name == "SerializeReference"))
                 {
-                    anyFieldIsManagedReference = true;
+                    usingManagedReference = true;
                     field.Type = "managedReference";
                 }
                 else
@@ -203,7 +231,7 @@ namespace AssetsTools.NET.Extra
                 }
                 else if (CommonMonoTemplateHelper.IsSpecialUnityType(fieldTypeDef.typeDef.FullName))
                 {
-                    field.Children = SpecialUnity(fieldTypeDef, availableDepth);
+                    field.Children = SpecialUnity(fieldTypeDef, availableDepth, ref usingManagedReference);
                 }
                 else if (derivesFromUEObject)
                 {
@@ -215,7 +243,7 @@ namespace AssetsTools.NET.Extra
                 }
                 else if (fieldTypeDef.typeDef.IsSerializable)
                 {
-                    field.Children = Serialized(fieldTypeDef, availableDepth);
+                    field.Children = Serialized(fieldTypeDef, availableDepth, ref usingManagedReference);
                 }
 
                 field.ValueType = AssetTypeValueField.GetValueTypeByTypeName(field.Type);
@@ -224,7 +252,7 @@ namespace AssetsTools.NET.Extra
 
                 if (isArrayOrList)
                 {
-                    if (isPrimitive || derivesFromUEObject)
+                    if (isPrimitive || isString || derivesFromUEObject)
                     {
                         field = CommonMonoTemplateHelper.Vector(field);
                     }
@@ -234,11 +262,6 @@ namespace AssetsTools.NET.Extra
                     }
                 }
                 localChildren.Add(field);
-            }
-
-            if (anyFieldIsManagedReference && DerivesFromUEObject(type))
-            {
-                localChildren.Add(CommonMonoTemplateHelper.ManagedReferencesRegistry("references", unityVersion));
             }
 
             return localChildren;
@@ -377,14 +400,16 @@ namespace AssetsTools.NET.Extra
             return false;
         }
 
-        private List<AssetTypeTemplateField> Serialized(TypeDefWithSelfRef type, int availableDepth)
+        private List<AssetTypeTemplateField> Serialized(
+            TypeDefWithSelfRef type, int availableDepth, ref bool usingManagedReference)
         {
             List<AssetTypeTemplateField> types = new List<AssetTypeTemplateField>();
-            RecursiveTypeLoad(type, types, availableDepth);
+            RecursiveTypeLoad(type, types, availableDepth, false, ref usingManagedReference);
             return types;
         }
 
-        private List<AssetTypeTemplateField> SpecialUnity(TypeDefWithSelfRef type, int availableDepth)
+        private List<AssetTypeTemplateField> SpecialUnity(
+            TypeDefWithSelfRef type, int availableDepth, ref bool usingManagedReference)
         {
             return type.typeDef.Name switch
             {
@@ -399,7 +424,9 @@ namespace AssetsTools.NET.Extra
                 "GUIStyle" => CommonMonoTemplateHelper.GUIStyle(unityVersion),
                 "Vector2Int" => CommonMonoTemplateHelper.Vector2Int(),
                 "Vector3Int" => CommonMonoTemplateHelper.Vector3Int(),
-                _ => Serialized(type, availableDepth)
+                "PropertyName" => CommonMonoTemplateHelper.PropertyName(unityVersion),
+                "SphericalHarmonicsL2" => CommonMonoTemplateHelper.SphericalHarmonicsL2(unityVersion),
+                _ => Serialized(type, availableDepth, ref usingManagedReference)
             };
         }
     }

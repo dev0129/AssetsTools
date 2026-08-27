@@ -1,5 +1,6 @@
-﻿using System.Collections.Generic;
-using System.Reflection;
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
 
 namespace AssetsTools.NET.Extra
 {
@@ -65,21 +66,21 @@ namespace AssetsTools.NET.Extra
 
             if (file.Metadata.TypeTreeEnabled)
             {
-                ushort scriptId = file.GetScriptIndex(info);
+                ushort scriptId = info.GetScriptIndex(file);
 
                 TypeTreeType ttType = file.Metadata.FindTypeTreeTypeByID(info.TypeId, scriptId);
 
-                string ttTypeName = ttType.Nodes[0].GetTypeString(ttType.StringBuffer);
+                string ttTypeName = ttType.Nodes[0].GetTypeString(ttType.StringBufferBytes);
                 if (ttType.Nodes.Count == 0) return cldb.GetString(type.Name); // fallback to cldb
-                if (ttType.Nodes.Count > 1 && ttType.Nodes[1].GetNameString(ttType.StringBuffer) == "m_Name")
+                if (ttType.Nodes.Count > 1 && ttType.Nodes[1].GetNameString(ttType.StringBufferBytes) == "m_Name")
                 {
-                    reader.Position = info.AbsoluteByteStart;
+                    reader.Position = info.GetAbsoluteByteOffset(file);
                     return reader.ReadCountStringInt32();
                 }
                 // todo, use the typetree since we have it already, there could be extra fields
                 else if (ttTypeName == "GameObject")
                 {
-                    reader.Position = info.AbsoluteByteStart;
+                    reader.Position = info.GetAbsoluteByteOffset(file);
                     int size = reader.ReadInt32();
                     int componentSize = file.Header.Version > 0x10 ? 0x0c : 0x10;
                     reader.Position += size * componentSize;
@@ -88,7 +89,7 @@ namespace AssetsTools.NET.Extra
                 }
                 else if (ttTypeName == "MonoBehaviour")
                 {
-                    reader.Position = info.AbsoluteByteStart;
+                    reader.Position = info.GetAbsoluteByteOffset(file);
                     reader.Position += 0x1c;
                     string name = reader.ReadCountStringInt32();
                     if (name != "")
@@ -103,12 +104,12 @@ namespace AssetsTools.NET.Extra
             if (type.ReleaseRootNode.Children.Count == 0) return typeName;
             if (type.ReleaseRootNode.Children.Count > 1 && cldb.GetString(type.ReleaseRootNode.Children[0].FieldName) == "m_Name")
             {
-                reader.Position = info.AbsoluteByteStart;
+                reader.Position = info.GetAbsoluteByteOffset(file);
                 return reader.ReadCountStringInt32();
             }
             else if (typeName == "GameObject")
             {
-                reader.Position = info.AbsoluteByteStart;
+                reader.Position = info.GetAbsoluteByteOffset(file);
                 int size = reader.ReadInt32();
                 int componentSize = file.Header.Version > 0x10 ? 0x0c : 0x10;
                 reader.Position += size * componentSize;
@@ -117,7 +118,7 @@ namespace AssetsTools.NET.Extra
             }
             else if (typeName == "MonoBehaviour")
             {
-                reader.Position = info.AbsoluteByteStart;
+                reader.Position = info.GetAbsoluteByteOffset(file);
                 reader.Position += 0x1c;
                 string name = reader.ReadCountStringInt32();
                 if (name != "")
@@ -126,6 +127,21 @@ namespace AssetsTools.NET.Extra
                 }
             }
             return typeName;
+        }
+
+        public static long GuidToPathId(string guid, int assetType, long internalId)
+        {
+            using MemoryStream ms = new MemoryStream();
+            AssetsFileWriter w = new AssetsFileWriter(ms);
+
+            w.WriteRawString(guid);
+            w.Write(assetType);
+            w.Write(internalId);
+
+            MD4 md4 = new MD4();
+            byte[] pathIdBytes = md4.GetByteHashFromBytes(ms.ToArray());
+            long pathId = BitConverter.ToInt64(pathIdBytes, 0);
+            return pathId;
         }
     }
 }

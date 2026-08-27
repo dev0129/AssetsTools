@@ -1,7 +1,5 @@
 ﻿using AssetsTools.NET.Extra;
-using System;
 using System.Collections.Generic;
-using System.Text;
 
 namespace AssetsTools.NET
 {
@@ -11,11 +9,11 @@ namespace AssetsTools.NET
         private Dictionary<AssetTypeReference, AssetTypeTemplateField> monoTemplateLookup;
         private IMonoBehaviourTemplateGenerator monoTemplateGenerator;
         private UnityVersion unityVersion;
-        private bool isSharedMonoLookup;
 
         public RefTypeManager()
         {
             typeTreeLookup = new Dictionary<AssetTypeReference, AssetTypeTemplateField>();
+            monoTemplateLookup = new Dictionary<AssetTypeReference, AssetTypeTemplateField>();
         }
 
         /// <summary>
@@ -24,17 +22,14 @@ namespace AssetsTools.NET
         public void Clear()
         {
             typeTreeLookup.Clear();
-            if (!isSharedMonoLookup)
-            {
-                monoTemplateLookup.Clear();
-            }
+            monoTemplateLookup.Clear();
         }
 
         /// <summary>
         /// Load the lookup from the type tree ref types of a serialized file.
         /// </summary>
         /// <param name="metadata">The metadata to load from.</param>
-        public void FromTypeTree(AssetsFileMetadata metadata)
+        public void FromTypeTree(AssetsFileMetadata metadata, IDictionary<Hash128, TypeTreeBlob> typeBlobLookup = null)
         {
             if (!metadata.TypeTreeEnabled || metadata.RefTypes == null)
             {
@@ -46,13 +41,25 @@ namespace AssetsTools.NET
                 if (!type.IsRefType)
                     continue;
 
-                AssetTypeTemplateField templateField = new AssetTypeTemplateField();
-                templateField.FromTypeTree(type);
-                // if ref type has fields with [SerializeReference] it can contain its own registry,
-                // but it shouldn't be there, as the registry is only available at the root type
-                if (templateField.Children.Count > 0 && templateField.Children[templateField.Children.Count - 1].ValueType == AssetValueType.ManagedReferencesRegistry)
+                AssetTypeTemplateField templateField;
+                if (type.TypeBlobIsDefinition)
                 {
-                    templateField.Children.RemoveAt(templateField.Children.Count - 1);
+                    templateField = new AssetTypeTemplateField();
+                    templateField.FromTypeTree(type);
+                    RemoveRedundantRegistry(templateField);
+                }
+                else
+                {
+                    // can't do anything if the external type blob is not loaded
+                    if (typeBlobLookup == null)
+                        continue;
+
+                    if (!typeBlobLookup.TryGetValue(type.ExtTypeHash, out TypeTreeBlob typeBlob))
+                        continue;
+
+                    templateField = new AssetTypeTemplateField();
+                    templateField.FromTypeBlob(typeBlob);
+                    RemoveRedundantRegistry(templateField);
                 }
 
                 typeTreeLookup[type.TypeReference] = templateField;
@@ -65,12 +72,15 @@ namespace AssetsTools.NET
         /// <param name="metadata">The metadata to load from.</param>
         /// <param name="monoTemplateGenerator">The mono template generator to use.</param>
         /// <param name="monoTemplateFieldCache">The cache to use.</param>
-        public void WithMonoTemplateGenerator(AssetsFileMetadata metadata, IMonoBehaviourTemplateGenerator monoTemplateGenerator, Dictionary<AssetTypeReference, AssetTypeTemplateField> monoTemplateFieldCache = null)
+        public void WithMonoTemplateGenerator(
+            AssetsFileMetadata metadata, IMonoBehaviourTemplateGenerator monoTemplateGenerator,
+            IDictionary<AssetTypeReference, AssetTypeTemplateField> monoTemplateFieldCache = null)
         {
             this.monoTemplateGenerator = monoTemplateGenerator;
             unityVersion = new UnityVersion(metadata.UnityVersion);
-            monoTemplateLookup = monoTemplateFieldCache ?? new Dictionary<AssetTypeReference, AssetTypeTemplateField>();
-            isSharedMonoLookup = monoTemplateLookup != null;
+            monoTemplateLookup = monoTemplateFieldCache != null
+                ? new Dictionary<AssetTypeReference, AssetTypeTemplateField>(monoTemplateFieldCache)
+                : new Dictionary<AssetTypeReference, AssetTypeTemplateField>();
         }
 
         /// <summary>
@@ -110,12 +120,28 @@ namespace AssetsTools.NET
                 templateField = monoTemplateGenerator.GetTemplateField(templateField, type.AsmName, type.Namespace, type.ClassName, unityVersion);
                 if (templateField != null)
                 {
+                    RemoveRedundantRegistry(templateField);
                     monoTemplateLookup[type] = templateField;
                     return templateField;
                 }
             }
 
             return null;
+        }
+
+        private void RemoveRedundantRegistry(AssetTypeTemplateField templateField)
+        {
+            // if ref type has fields with [SerializeReference] it can contain its own registry,
+            // but it shouldn't be there, as the registry is only available at the root type
+            if (templateField.Children.Count == 0)
+                return;
+
+            int lastChildIdx = templateField.Children.Count - 1;
+            AssetTypeTemplateField lastChild = templateField[lastChildIdx];
+            if (lastChild.ValueType == AssetValueType.ManagedReferencesRegistry)
+            {
+                templateField.Children.RemoveAt(lastChildIdx);
+            }
         }
     }
 }

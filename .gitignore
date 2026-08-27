@@ -327,5 +327,5 @@ ASALocalRun/
 *.zip
 
 # CMake
-
 out/
+build/

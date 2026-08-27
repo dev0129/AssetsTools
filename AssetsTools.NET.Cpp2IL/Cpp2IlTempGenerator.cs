@@ -5,25 +5,33 @@ using LibCpp2IL.Reflection;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Reflection;
-using UnityVersion = AssetsTools.NET.Extra.UnityVersion;
+using ARUnityVersion = AssetRipper.Primitives.UnityVersion;
+using ATUnityVersion = AssetsTools.NET.Extra.UnityVersion;
 
 namespace AssetsTools.NET.Cpp2IL
 {
     public class Cpp2IlTempGenerator : IMonoBehaviourTemplateGenerator
     {
-        private readonly string _globalMetadataPath;
-        private readonly string _assemblyPath;
-        private int[] _il2cppUnityVersion;
-        private UnityVersion _unityVersion;
+        private readonly byte[] _globalMetadataBytes;
+        private readonly byte[] _assemblyBytes;
+        private ATUnityVersion _unityVersion;
         private bool _initialized;
-        private bool anyFieldIsManagedReference;
+        private bool _anyFieldIsManagedReference;
 
         public Cpp2IlTempGenerator(string globalMetadataPath, string assemblyPath)
         {
-            _globalMetadataPath = globalMetadataPath;
-            _assemblyPath = assemblyPath;
+            _globalMetadataBytes = File.ReadAllBytes(globalMetadataPath);
+            _assemblyBytes = File.ReadAllBytes(assemblyPath);
+            ResetCpp2IL();
+        }
+
+        public Cpp2IlTempGenerator(byte[] globalMetadataBytes, byte[] assemblyBytes)
+        {
+            _globalMetadataBytes = globalMetadataBytes;
+            _assemblyBytes = assemblyBytes;
             ResetCpp2IL();
         }
 
@@ -35,50 +43,55 @@ namespace AssetsTools.NET.Cpp2IL
         public void ResetCpp2IL()
         {
             LibCpp2IlMain.Reset();
-            _il2cppUnityVersion = null;
+            _unityVersion = null;
             _initialized = false;
         }
 
-        public void SetUnityVersion(UnityVersion unityVersion)
+        public void SetUnityVersion(ATUnityVersion unityVersion)
         {
             LibCpp2IlMain.Reset();
             _unityVersion = unityVersion;
-            _il2cppUnityVersion = new[] { unityVersion.major, unityVersion.minor, unityVersion.patch };
+            _initialized = false;
+        }
+
+        public void SetUnityVersion(ARUnityVersion unityVersion)
+        {
+            LibCpp2IlMain.Reset();
+            _unityVersion = new ATUnityVersion(unityVersion.ToString());
             _initialized = false;
         }
 
         public void SetUnityVersion(int major, int minor, int patch)
         {
             LibCpp2IlMain.Reset();
-            _unityVersion = new UnityVersion(major + "." + minor + "." + patch);
-            _il2cppUnityVersion = new[] { major, minor, patch };
+            _unityVersion = new ATUnityVersion(major + "." + minor + "." + patch);
             _initialized = false;
         }
 
         public void InitializeCpp2IL()
         {
-            if (!LibCpp2IlMain.LoadFromFile(_assemblyPath, _globalMetadataPath, _il2cppUnityVersion))
+            ARUnityVersion arUnityVersion = ARUnityVersion.Parse(_unityVersion.ToString());
+            if (!LibCpp2IlMain.Initialize(_assemblyBytes, _globalMetadataBytes, arUnityVersion))
             {
-                throw new Exception("CPP2IL initialization failed!");
+                throw new Exception("Cpp2Il initialization failed");
             }
             _initialized = true;
         }
 
-        public AssetTypeTemplateField GetTemplateField(AssetTypeTemplateField baseField, string assemblyName, string nameSpace, string className, UnityVersion unityVersion)
+        public AssetTypeTemplateField GetTemplateField(AssetTypeTemplateField baseField, string assemblyName, string nameSpace, string className, ATUnityVersion unityVersion)
         {
             int[] il2cppUnityVersion = new[] { unityVersion.major, unityVersion.minor, unityVersion.patch };
-            if (_il2cppUnityVersion == null)
+            if (!_initialized)
             {
                 SetUnityVersion(unityVersion);
                 InitializeCpp2IL();
             }
-            else if (_il2cppUnityVersion[0] != il2cppUnityVersion[0] && _il2cppUnityVersion[1] != il2cppUnityVersion[1] && _il2cppUnityVersion[2] != il2cppUnityVersion[2])
+            else if (_unityVersion.major != unityVersion.major || _unityVersion.minor != unityVersion.minor || _unityVersion.patch != unityVersion.patch)
             {
-                Debug.WriteLine("Warning: This unity version does not match what CPP2IL was registered with. Call ResetUnityVersion().");
+                Debug.WriteLine("Warning: This unity version does not match what Cpp2Il was registered with. Call ResetUnityVersion().");
             }
 
-            _unityVersion = unityVersion;
-            anyFieldIsManagedReference = false;
+            _anyFieldIsManagedReference = false;
 
             Il2CppMetadata meta = LibCpp2IlMain.TheMetadata;
 
@@ -117,28 +130,89 @@ namespace AssetsTools.NET.Cpp2IL
             return newBaseField;
         }
 
+        public byte[] LoadNewCustomAttributeData(Il2CppImageDefinition image, Il2CppMetadata metadata, Il2CppFieldDefinition field)
+        {
+            Il2CppCustomAttributeDataRange target = new Il2CppCustomAttributeDataRange
+            {
+                token = field.token
+            };
+
+            int caIndex = metadata.AttributeDataRanges.BinarySearch
+            (
+                image.customAttributeStart,
+                (int)image.customAttributeCount,
+                target,
+                new TokenComparer()
+            );
+
+            if (caIndex < 0)
+            {
+                return null;
+            }
+
+            Il2CppCustomAttributeDataRange attributeDataRange = metadata.AttributeDataRanges[caIndex];
+            Il2CppCustomAttributeDataRange next = metadata.AttributeDataRanges[caIndex + 1];
+
+            long attributeDataOffset = metadata.metadataHeader.attributeData.Offset;
+            long blobStart = attributeDataOffset + attributeDataRange.startOffset;
+            long blobEnd = attributeDataOffset + next.startOffset;
+
+            return metadata.ReadByteArrayAtRawAddress(blobStart, (int)(blobEnd - blobStart));
+        }
+
         private List<string> GetAttributeNamesOnField(Il2CppImageDefinition image, Il2CppFieldDefinition field)
         {
             List<string> attributeNames = new List<string>();
 
-            var attributeTypeRange = LibCpp2IlMain.TheMetadata.GetCustomAttributeData(image, field.customAttributeIndex, field.token);
-
-            if (attributeTypeRange == null)
+            Il2CppMetadata metadata = LibCpp2IlMain.TheMetadata;
+            if (LibCpp2IlMain.MetadataVersion >= 29f)
             {
+                // new version
+                byte[] rawAttrData = LoadNewCustomAttributeData(image, metadata, field);
+                if (rawAttrData == null)
+                {
+                    // no attributes
+                    return attributeNames;
+                }
+
+                ParsedCustomAttrData parsedCustomAttrData = new ParsedCustomAttrData(rawAttrData);
+                foreach (uint attrIdx in parsedCustomAttrData.attributeIndices)
+                {
+                    var attrCtorMethod = metadata.methodDefs[attrIdx];
+
+                    var attrCtorMethodTypeIdx = attrCtorMethod.declaringTypeIdx;
+                    if (attrCtorMethodTypeIdx.IsNull)
+                        continue;
+
+                    var attrType = metadata.typeDefs[attrCtorMethodTypeIdx.Value];
+                    attributeNames.Add(attrType.FullName);
+                }
+
                 return attributeNames;
             }
-
-            for (int attributeIdx = 0; attributeIdx < attributeTypeRange.count; attributeIdx++)
+            else
             {
-                var attributeTypeIndex = LibCpp2IlMain.TheMetadata.attributeTypes[attributeTypeRange.start + attributeIdx];
-                var attributeTypeDef = LibCpp2IlMain.TheMetadata.typeDefs.FirstOrDefault(td => td.byvalTypeIndex == attributeTypeIndex);
-                if (attributeTypeDef != null)
+                // old version
+                var attributeTypeRange = metadata.GetCustomAttributeData(image, field.customAttributeIndex, field.token, out int idx);
+                if (attributeTypeRange == null)
                 {
-                    attributeNames.Add(attributeTypeDef.FullName);
+                    return attributeNames;
                 }
-            }
 
-            return attributeNames;
+                for (int attributeIdx = 0; attributeIdx < attributeTypeRange.count; attributeIdx++)
+                {
+                    var attributeTypeIndex = metadata.attributeTypes[attributeTypeRange.start + attributeIdx];
+                    var attributeTypeDef = metadata.typeDefs.FirstOrDefault(
+                        td => td.ByvalTypeIndex.IsNonNull && td.ByvalTypeIndex.Value == attributeTypeIndex);
+
+                    if (attributeTypeDef != null)
+                    {
+                        attributeNames.Add(attributeTypeDef.FullName);
+                    }
+                }
+
+                return attributeNames;
+            }
         }
 
         private void RecursiveTypeLoad(TypeDefWithSelfRef type, List<AssetTypeTemplateField> templateFields, int availableDepth, bool isRecursiveCall = false)
@@ -179,17 +253,22 @@ namespace AssetsTools.NET.Cpp2IL
 
                 if (fieldTypeDef.typeRef.isArray)
                 {
-                    isArrayOrList = fieldTypeDef.typeRef.arrayRank == 1;
-                    fieldTypeDef = fieldTypeDef.typeRef.arrayType;
+                    isArrayOrList = fieldTypeDef.typeRef.arrayRank == 1; // isn't this always true?
+                    if (isArrayOrList)
+                    {
+                        // resolidify the type to match the actual element
+                        // back to its original type if it's a generic one
+                        fieldTypeDef = type.SolidifyType(fieldTypeDef.typeRef.arrayType);
+                    }
                 }
                 else if (fieldTypeDef.typeDef.FullName == "System.Collections.Generic.List`1")
                 {
-                    fieldTypeDef = fieldTypeDef.typeRef.genericParams[0];
                     isArrayOrList = true;
+                    fieldTypeDef = fieldTypeDef.typeRef.genericParams[0];
                 }
 
                 List<string> attributeNames = GetAttributeNamesOnField(type.typeDef.DeclaringAssembly, fieldDef);
-                TypeAttributes typeAttrs = (TypeAttributes)fieldTypeDef.typeDef.flags;
+                TypeAttributes typeAttrs = (TypeAttributes)fieldTypeDef.typeDef.Flags;
                 bool isSerializable = typeAttrs.HasFlag(TypeAttributes.Serializable);
 
                 field.Name = fieldDef.Name;
@@ -212,7 +291,7 @@ namespace AssetsTools.NET.Cpp2IL
                 }
                 else if (isManagedReference = attributeNames.Contains("UnityEngine.SerializeReference"))
                 {
-                    anyFieldIsManagedReference = true;
+                    _anyFieldIsManagedReference = true;
                     field.Type = "managedReference";
                 }
                 else
@@ -246,7 +325,7 @@ namespace AssetsTools.NET.Cpp2IL
                 }
                 else
                 {
-                    Console.WriteLine("you wot mate");
+                    throw new Exception($"Could not determine type of asset field to use for {field.Name}");
                 }
 
                 field.ValueType = AssetTypeValueField.GetValueTypeByTypeName(field.Type);
@@ -268,7 +347,7 @@ namespace AssetsTools.NET.Cpp2IL
                 localChildren.Add(field);
             }
 
-            if (anyFieldIsManagedReference && DerivesFromUEObject(type))
+            if (_anyFieldIsManagedReference && DerivesFromUEObject(type))
             {
                 localChildren.Add(CommonMonoTemplateHelper.ManagedReferencesRegistry("references", _unityVersion));
             }
@@ -402,7 +481,7 @@ namespace AssetsTools.NET.Cpp2IL
 
         private bool DerivesFromUEObject(TypeDefWithSelfRef typeDef)
         {
-            TypeAttributes typeAttributes = (TypeAttributes)typeDef.typeDef.flags;
+            TypeAttributes typeAttributes = (TypeAttributes)typeDef.typeDef.Flags;
 
             if (typeDef.typeDef.BaseType == null)
                 return false;
@@ -438,6 +517,8 @@ namespace AssetsTools.NET.Cpp2IL
                 "GUIStyle" => CommonMonoTemplateHelper.GUIStyle(_unityVersion),
                 "Vector2Int" => CommonMonoTemplateHelper.Vector2Int(),
                 "Vector3Int" => CommonMonoTemplateHelper.Vector3Int(),
+                "PropertyName" => CommonMonoTemplateHelper.PropertyName(_unityVersion),
+                "SphericalHarmonicsL2" => CommonMonoTemplateHelper.SphericalHarmonicsL2(_unityVersion),
                 _ => Serialized(type, availableDepth)
             };
         }

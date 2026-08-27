@@ -59,7 +59,7 @@ namespace AssetsTools.NET
             ByteSize = reader.ReadInt32();
             Index = reader.ReadUInt32();
             MetaFlags = reader.ReadUInt32();
-            if (version >= 0x12)
+            if (version >= 18)
             {
                 RefTypeHash = reader.ReadUInt64();
             }
@@ -80,11 +80,13 @@ namespace AssetsTools.NET
             writer.Write(ByteSize);
             writer.Write(Index);
             writer.Write(MetaFlags);
-            if (version >= 0x12)
+            if (version >= 18)
             {
                 writer.Write(RefTypeHash);
             }
         }
+
+        // todo: these two GetXXXString methods should be using caching
 
         /// <summary>
         /// Get the type name from the string table (from <see cref="TypeTreeType.StringBuffer"/>).
@@ -95,7 +97,7 @@ namespace AssetsTools.NET
         /// See <see cref="ClassDatabaseFile.CommonStringBufferIndices"/>.
         /// </param>
         /// <returns>The node type name.</returns>
-        public string GetTypeString(string stringTable, string commonStringTable = null)
+        public string GetTypeString(byte[] stringTable, byte[] commonStringTable = null)
         {
             return ReadStringTableString(stringTable, commonStringTable ?? TypeTreeType.COMMON_STRING_TABLE, TypeStrOffset);
         }
@@ -109,29 +111,34 @@ namespace AssetsTools.NET
         /// See <see cref="ClassDatabaseFile.CommonStringBufferIndices"/>.
         /// </param>
         /// <returns>The node name.</returns>
-        public string GetNameString(string stringTable, string commonStringTable = null)
+        public string GetNameString(byte[] stringTable, byte[] commonStringTable = null)
         {
             return ReadStringTableString(stringTable, commonStringTable ?? TypeTreeType.COMMON_STRING_TABLE, NameStrOffset);
         }
 
-        private string ReadStringTableString(string stringTable, string commonStringTable, uint offset)
+        /// <summary>
+        /// Get the maximum size of this type tree node for a version.
+        /// </summary>
+        /// <param name="version">The version of the file.</param>
+        public static long GetSize(uint version)
         {
-            if (offset >= 0x80000000)
+            long size = 24;
+            if (version >= 0x12)
+                size += 8;
+
+            return size;
+        }
+
+        private string ReadStringTableString(byte[] stringTable, byte[] commonStringTable, uint offset)
+        {
+            if ((offset & 0x80000000) != 0)
             {
                 offset &= ~0x80000000;
                 stringTable = commonStringTable;
             }
 
-            StringBuilder str = new StringBuilder();
-            int pos = (int)offset;
-            char c;
-            while ((c = stringTable[pos]) != 0x00)
-            {
-                str.Append(c);
-                pos++;
-            }
-
-            return str.ToString();
+            var endIdx = Array.IndexOf(stringTable, (byte)0, (int)offset);
+            return Encoding.UTF8.GetString(stringTable, (int)offset, (int)(endIdx - offset));
         }
     }
 }

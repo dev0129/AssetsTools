@@ -2,6 +2,7 @@
 using AssetsTools.NET.Extra;
 using AssetsTools.NET.Texture;
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -45,9 +46,9 @@ namespace AssetsView.Winforms
                 AssetBundleFile bundle = inst.parentBundle.file;
 
                 AssetsFileReader reader = bundle.DataReader;
-                AssetBundleDirectoryInfo[] dirInf = bundle.BlockAndDirInfo.DirectoryInfos;
+                List<AssetBundleDirectoryInfo> dirInf = bundle.BlockAndDirInfo.DirectoryInfos;
                 bool foundFile = false;
-                for (int i = 0; i < dirInf.Length; i++)
+                for (int i = 0; i < dirInf.Count; i++)
                 {
                     AssetBundleDirectoryInfo info = dirInf[i];
                     if (info.Name == searchPath)
@@ -67,7 +68,8 @@ namespace AssetsView.Winforms
                 }
             }
 
-            byte[] texDat = tf.GetTextureData(inst);
+            byte[] rawTexDat = tf.FillPictureData(inst);
+            byte[] texDat = tf.DecodeTextureRaw(rawTexDat);
             if (texDat != null && texDat.Length > 0)
             {
                 string fmtName = ((TextureFormat)tf.m_TextureFormat).ToString().Replace("_", " ");
@@ -93,7 +95,7 @@ namespace AssetsView.Winforms
                 mouseDown = false;
 
                 DoubleBuffered = true;
-                
+
                 Rectangle workingArea = Screen.PrimaryScreen.WorkingArea;
                 int waWidth = workingArea.Width;
                 int waHeight = workingArea.Height;
@@ -133,7 +135,7 @@ namespace AssetsView.Winforms
 
         public void SaveTexture()
         {
-            if(image == null)
+            if (image == null)
             {
                 return;
             }

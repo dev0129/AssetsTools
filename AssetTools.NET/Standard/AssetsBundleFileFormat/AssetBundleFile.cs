@@ -5,7 +5,6 @@ using SevenZip.Compression.LZMA;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 
 namespace AssetsTools.NET
 {
@@ -30,12 +29,19 @@ namespace AssetsTools.NET
 
         public AssetsFileReader Reader;
 
+        /// <summary>
+        /// Closes the reader.
+        /// </summary>
         public void Close()
         {
             Reader.Close();
             DataReader.Close();
         }
 
+        /// <summary>
+        /// Read the <see cref="AssetBundleFile"/> with the provided reader.
+        /// </summary>
+        /// <param name="reader">The reader to use.</param>
         public void Read(AssetsFileReader reader)
         {
             Reader = reader;
@@ -71,7 +77,12 @@ namespace AssetsTools.NET
             }
         }
 
-        public void Write(AssetsFileWriter writer, List<BundleReplacer> replacers, ClassDatabaseFile typeMeta = null)
+        /// <summary>
+        /// Write the <see cref="AssetBundleFile"/> with the provided writer.
+        /// </summary>
+        /// <param name="writer">The writer to use.</param>
+        /// <param name="filePos">Where in the stream to start writing. Use -1 to start writing at the current stream position.</param>
+        public void Write(AssetsFileWriter writer, long filePos = 0)
         {
             if (Header == null)
                 throw new Exception("Header must be loaded! (Did you forget to call bundle.Read?)");
@@ -82,9 +93,13 @@ namespace AssetsTools.NET
             if (DataIsCompressed)
                 throw new Exception("Bundles must be decompressed before writing.");
 
-            writer.Position = 0;
+            long writeStart = filePos;
+            if (filePos == -1)
+                writeStart = writer.Position;
+            else
+                writer.Position = filePos;
 
-            AssetBundleDirectoryInfo[] directoryInfos = BlockAndDirInfo.DirectoryInfos;
+            List<AssetBundleDirectoryInfo> directoryInfos = BlockAndDirInfo.DirectoryInfos;
 
             Header.Write(writer);
 
@@ -93,109 +108,72 @@ namespace AssetsTools.NET
                 writer.Align16();
             }
 
-            AssetBundleBlockInfo newBlockInfo = new AssetBundleBlockInfo
+            long blockDataLength = 0;
+            int blockDataCount = 1;
+            foreach (AssetBundleDirectoryInfo dirInfo in directoryInfos)
             {
-                CompressedSize = 0,
-                DecompressedSize = 0,
-                Flags = 0x40
-            };
+                if (dirInfo.Replacer != null)
+                {
+                    blockDataLength += dirInfo.Replacer.GetSize();
+                }
+                else
+                {
+                    blockDataLength += dirInfo.DecompressedSize;
+                }
+
+                while (blockDataLength >= uint.MaxValue)
+                {
+                    blockDataLength -= uint.MaxValue;
+                    blockDataCount++;
+                }
+            }
 
             AssetBundleBlockAndDirInfo newBundleInf = new AssetBundleBlockAndDirInfo()
             {
                 Hash = new Hash128(),
-                BlockInfos = new AssetBundleBlockInfo[] { newBlockInfo }
+                BlockInfos = new AssetBundleBlockInfo[blockDataCount]
             };
 
-            // Assets that did not have their data modified but need
-            // the original info to read from the original file
-            var newToOriginalDirInfoLookup = new Dictionary<AssetBundleDirectoryInfo, AssetBundleDirectoryInfo>();
-            List<AssetBundleDirectoryInfo> originalDirInfos = new List<AssetBundleDirectoryInfo>();
-            List<AssetBundleDirectoryInfo> dirInfos = new List<AssetBundleDirectoryInfo>();
-            List<BundleReplacer> currentReplacers = replacers.ToList();
-
-            // Write all original file infos and skip those to be removed
-            for (int i = 0; i < directoryInfos.Length; i++)
+            for (int i = 0; i < blockDataCount; i++)
             {
-                AssetBundleDirectoryInfo info = directoryInfos[i];
-                originalDirInfos.Add(info);
-
-                AssetBundleDirectoryInfo newInfo = new AssetBundleDirectoryInfo()
+                newBundleInf.BlockInfos[i] = new AssetBundleBlockInfo
                 {
-                    // Offset and size to be replaced later
-                    Offset = 0,
+                    CompressedSize = 0,
                     DecompressedSize = 0,
-                    Flags = info.Flags,
-                    Name = info.Name
+                    Flags = 0x40
                 };
-
-                BundleReplacer replacer = currentReplacers.FirstOrDefault(rep => rep.GetOriginalEntryName() == newInfo.Name);
-                if (replacer != null)
-                {
-                    if (!replacer.Init(DataReader, info.Offset, info.DecompressedSize, typeMeta))
-                    {
-                        throw new Exception("Something went wrong initializing a replacer!");
-                    }
-
-                    currentReplacers.Remove(replacer);
-                    if (replacer.GetReplacementType() == BundleReplacementType.AddOrModify)
-                    {
-                        newInfo = new AssetBundleDirectoryInfo()
-                        {
-                            Offset = 0,
-                            DecompressedSize = 0,
-                            Flags = info.Flags,
-                            Name = replacer.GetEntryName()
-                        };
-                    }
-                    else if (replacer.GetReplacementType() == BundleReplacementType.Rename)
-                    {
-                        newInfo = new AssetBundleDirectoryInfo()
-                        {
-                            Offset = 0,
-                            DecompressedSize = 0,
-                            Flags = info.Flags,
-                            Name = replacer.GetEntryName()
-                        };
-                        newToOriginalDirInfoLookup[newInfo] = info;
-                    }
-                    else if (replacer.GetReplacementType() == BundleReplacementType.Remove)
-                    {
-                        continue;
-                    }
-                }
-                else
-                {
-                    newToOriginalDirInfoLookup[newInfo] = info;
-                }
-            
-                dirInfos.Add(newInfo);
             }
 
-            // Add new file infos
-            while (currentReplacers.Count > 0)
+            List<AssetBundleDirectoryInfo> dirInfos = new List<AssetBundleDirectoryInfo>();
+
+            // write all original file infos and skip those to be removed
+            int dirCount = directoryInfos.Count;
+            for (int i = 0; i < dirCount; i++)
             {
-                BundleReplacer replacer = currentReplacers[0];
-                if (replacer.GetReplacementType() == BundleReplacementType.AddOrModify)
-                {
-                    AssetBundleDirectoryInfo info = new AssetBundleDirectoryInfo()
-                    {
-                        Offset = 0,
-                        DecompressedSize = 0,
-                        Flags = (uint)(replacer.HasSerializedData() ? 0x04 : 0x00),
-                        Name = replacer.GetEntryName()
-                    };
+                AssetBundleDirectoryInfo dirInfo = directoryInfos[i];
+                ContentReplacerType replacerType = dirInfo.ReplacerType;
 
-                    dirInfos.Add(info);
-                }
-                currentReplacers.Remove(replacer);
+                if (replacerType == ContentReplacerType.Remove)
+                    continue;
+
+                dirInfos.Add(new AssetBundleDirectoryInfo()
+                {
+                    // offset and size to be edited later
+                    Offset = dirInfo.Offset,
+                    DecompressedSize = dirInfo.DecompressedSize,
+                    Flags = dirInfo.Flags,
+                    Name = dirInfo.Name,
+                    Replacer = dirInfo.Replacer,
+                });
             }
 
-            // Write the listings
+            // write the listings
             long bundleInfPos = writer.Position;
-            // This is only here to allocate enough space so it's fine if it's inaccurate
-            newBundleInf.DirectoryInfos = dirInfos.ToArray();
+            // this is only here to allocate enough space so it's fine if it's inaccurate
+            newBundleInf.DirectoryInfos = dirInfos;
             newBundleInf.Write(writer);
-            
+
+            long assetDataPosBeforeAlign = writer.Position;
             if ((Header.FileStreamHeader.Flags & AssetBundleFSHeaderFlags.BlockInfoNeedPaddingAtStart) != 0)
             {
                 writer.Align16();
@@ -203,7 +181,7 @@ namespace AssetsTools.NET
 
             long assetDataPos = writer.Position;
 
-            // Write the updated directory infos
+            // write the updated directory infos
             for (int i = 0; i < dirInfos.Count; i++)
             {
                 AssetBundleDirectoryInfo info = dirInfos[i];
@@ -216,42 +194,44 @@ namespace AssetsTools.NET
                         long endPos = replacer.Write(writer);
                         long size = endPos - startPos;
 
-                        dirInfos[i].DecompressedSize = size;
-                        dirInfos[i].Offset = startPos - assetDataPos;
-                    }
-                    else if (replacer.GetReplacementType() == BundleReplacementType.Remove)
-                    {
-                        continue;
-                    }
+                ContentReplacerType replacerType = dirInfo.ReplacerType;
+                if (replacerType == ContentReplacerType.AddOrModify)
+                {
+                    dirInfo.Replacer.Write(writer, true);
                 }
                 else
                 {
-                    if (newToOriginalDirInfoLookup.TryGetValue(info, out AssetBundleDirectoryInfo originalInfo))
-                    {
-                        long startPos = writer.Position;
-
-                        DataReader.Position = originalInfo.Offset;
-                        DataReader.BaseStream.CopyToCompat(writer.BaseStream, originalInfo.DecompressedSize);
-
-                        dirInfos[i].DecompressedSize = originalInfo.DecompressedSize;
-                        dirInfos[i].Offset = startPos - assetDataPos;
-                    }
+                    DataReader.Position = dirInfo.Offset;
+                    DataReader.BaseStream.CopyToCompat(writer.BaseStream, dirInfo.DecompressedSize);
                 }
+
+                dirInfo.Offset = newOffset;
+                dirInfo.DecompressedSize = writer.Position - startPosition;
             }
 
-            // Now that we know what the sizes are of the written files, let's go back and fix them
+            // now that we know what the sizes are of the written files, let's go back and fix them
             long finalSize = writer.Position;
-            uint assetSize = (uint)(finalSize - assetDataPos);
+            long assetSize = finalSize - assetDataPos;
+
+            // is it okay to have blocks of zero size in case we overshoot?
+            long remainingAssetSize = assetSize;
+            for (int i = 0; i < newBundleInf.BlockInfos.Length; i++)
+            {
+                AssetBundleBlockInfo blockInfo = newBundleInf.BlockInfos[i];
+                uint take = (uint)Math.Min(remainingAssetSize, uint.MaxValue);
+                blockInfo.DecompressedSize = take;
+                blockInfo.CompressedSize = take;
+                remainingAssetSize -= take;
+            }
+
+            newBundleInf.DirectoryInfos = dirInfos;
 
             writer.Position = bundleInfPos;
-            newBlockInfo.DecompressedSize = assetSize;
-            newBlockInfo.CompressedSize = assetSize;
-            newBundleInf.DirectoryInfos = dirInfos.ToArray();
             newBundleInf.Write(writer);
 
-            uint infoSize = (uint)(assetDataPos - bundleInfPos);
+            uint infoSize = (uint)(assetDataPosBeforeAlign - bundleInfPos);
 
-            writer.Position = 0;
+            writer.Position = writeStart;
             AssetBundleHeader newBundleHeader = new AssetBundleHeader
             {
                 Signature = Header.Signature,
@@ -263,13 +243,19 @@ namespace AssetsTools.NET
                     TotalFileSize = finalSize,
                     CompressedSize = infoSize,
                     DecompressedSize = infoSize,
-                    // Unset "info at end" flag and compression value
+                    // unset "info at end" flag and compression value
                     Flags = Header.FileStreamHeader.Flags & ~AssetBundleFSHeaderFlags.BlockAndDirAtEnd & ~AssetBundleFSHeaderFlags.CompressionMask
                 }
             };
+
             newBundleHeader.Write(writer);
         }
 
+        /// <summary>
+        /// Unpack and write the uncompressed <see cref="AssetBundleFile"/> with the provided writer. <br/>
+        /// You must write to a new file or stream when calling this method.
+        /// </summary>
+        /// <param name="writer">The writer to use.</param>
         public void Unpack(AssetsFileWriter writer)
         {
             if (Header == null)
@@ -282,7 +268,7 @@ namespace AssetsTools.NET
             AssetsFileReader reader = DataReader;
 
             AssetBundleBlockInfo[] blockInfos = BlockAndDirInfo.BlockInfos;
-            AssetBundleDirectoryInfo[] directoryInfos = BlockAndDirInfo.DirectoryInfos;
+            List<AssetBundleDirectoryInfo> directoryInfos = BlockAndDirInfo.DirectoryInfos;
 
             AssetBundleHeader newBundleHeader = new AssetBundleHeader()
             {
@@ -315,11 +301,11 @@ namespace AssetsTools.NET
             {
                 Hash = new Hash128(),
                 BlockInfos = new AssetBundleBlockInfo[blockInfos.Length],
-                DirectoryInfos = new AssetBundleDirectoryInfo[directoryInfos.Length]
+                DirectoryInfos = new List<AssetBundleDirectoryInfo>(directoryInfos.Count)
             };
 
             // todo: we should just use one block here
-            for (int i = 0; i < newBundleInf.BlockInfos.Length; i++)
+            for (int i = 0; i < blockInfos.Length; i++)
             {
                 newBundleInf.BlockInfos[i] = new AssetBundleBlockInfo()
                 {
@@ -330,15 +316,15 @@ namespace AssetsTools.NET
                 };
             }
 
-            for (int i = 0; i < newBundleInf.DirectoryInfos.Length; i++)
+            for (int i = 0; i < directoryInfos.Count; i++)
             {
-                newBundleInf.DirectoryInfos[i] = new AssetBundleDirectoryInfo()
+                newBundleInf.DirectoryInfos.Add(new AssetBundleDirectoryInfo()
                 {
                     Offset = directoryInfos[i].Offset,
                     DecompressedSize = directoryInfos[i].DecompressedSize,
                     Flags = directoryInfos[i].Flags,
                     Name = directoryInfos[i].Name
-                };
+                });
             }
 
             newBundleHeader.Write(writer);
@@ -399,7 +385,16 @@ namespace AssetsTools.NET
             }
         }
 
-        public void Pack(AssetsFileReader reader, AssetsFileWriter writer, AssetBundleCompressionType compType, bool blockDirAtEnd = true, IAssetBundleCompressProgress progress = null)
+        /// <summary>
+        /// Pack and write the compressed <see cref="AssetBundleFile"/> with the provided writer. <br/>
+        /// You must write to a new file or stream when calling this method.
+        /// </summary>
+        /// <param name="writer">The writer to use.</param>
+        /// <param name="compType">The compression type to use. LZ4 compresses worse but faster, LZMA compresses better but slower.</param>
+        /// <param name="blockDirAtEnd">Put block and directory list at end? This skips creating temporary files, but is not officially used.</param>
+        /// <param name="progress">Optional callback for compression progress.</param>
+        public void Pack(AssetsFileWriter writer, AssetBundleCompressionType compType,
+            bool blockDirAtEnd = true, IAssetBundleCompressProgress progress = null)
         {
             if (Header == null)
                 throw new Exception("Header must be loaded! (Did you forget to call bundle.Read?)");
@@ -410,7 +405,7 @@ namespace AssetsTools.NET
             if (DataIsCompressed)
                 throw new Exception("Bundles must be decompressed before writing.");
 
-            reader.Position = 0;
+            Reader.Position = 0;
             writer.Position = 0;
 
             AssetBundleFSHeader newFsHeader = new AssetBundleFSHeader
@@ -494,6 +489,7 @@ namespace AssetsTools.NET
                     break;
                 }
                 case AssetBundleCompressionType.LZ4:
+                case AssetBundleCompressionType.LZ4Fast:
                 {
                     // compress into 0x20000 blocks
                     BinaryReader bundleDataReader = new BinaryReader(bundleDataStream);
@@ -507,7 +503,9 @@ namespace AssetsTools.NET
                     byte[] uncompressedBlock = bundleDataReader.ReadBytes(0x20000);
                     while (uncompressedBlock.Length != 0)
                     {
-                        byte[] compressedBlock = LZ4Codec.Encode32HC(uncompressedBlock, 0, uncompressedBlock.Length);
+                        byte[] compressedBlock = compType == AssetBundleCompressionType.LZ4Fast
+                            ? LZ4Codec.Encode32(uncompressedBlock, 0, uncompressedBlock.Length)
+                            : LZ4Codec.Encode32HC(uncompressedBlock, 0, uncompressedBlock.Length);
 
                         if (progress != null)
                         {
@@ -592,7 +590,9 @@ namespace AssetsTools.NET
             }
 
             // listing is usually lz4 even if the data blocks are lzma
-            byte[] bundleInfoBytesCom = LZ4Codec.Encode32HC(bundleInfoBytes, 0, bundleInfoBytes.Length);
+            byte[] bundleInfoBytesCom = compType == AssetBundleCompressionType.LZ4Fast
+                ? LZ4Codec.Encode32(bundleInfoBytes, 0, bundleInfoBytes.Length)
+                : LZ4Codec.Encode32HC(bundleInfoBytes, 0, bundleInfoBytes.Length);
 
             long totalFileSize = headerSize + bundleInfoBytesCom.Length + totalCompressedSize;
             newFsHeader.TotalFileSize = totalFileSize;
@@ -620,9 +620,11 @@ namespace AssetsTools.NET
                 writer.Align16();
         }
 
-        public void UnpackInfoOnly()
+        private void UnpackInfoOnly()
         {
-            // todo, exceptions
+            if (Header == null)
+                throw new Exception("Header must be loaded! (Did you forget to call bundle.Read?)");
+
             MemoryStream blocksInfoStream;
             AssetsFileReader memReader;
 
@@ -679,7 +681,7 @@ namespace AssetsTools.NET
 
             // it hasn't been seen but it's possible we
             // find mixed lz4 and lzma. if so, that's bad news.
-            switch (GetCompressionType(BlockAndDirInfo.BlockInfos))
+            switch (GetCompressionType())
             {
                 case AssetBundleCompressionType.None:
                 {
@@ -706,8 +708,13 @@ namespace AssetsTools.NET
 
         }
 
-        public AssetBundleCompressionType GetCompressionType(AssetBundleBlockInfo[] blockInfos)
+        /// <summary>
+        /// Returns the main compression type the bundle uses (the first uncompressed block type).
+        /// </summary>
+        /// <returns>The compression type</returns>
+        public AssetBundleCompressionType GetCompressionType()
         {
+            AssetBundleBlockInfo[] blockInfos = BlockAndDirInfo.BlockInfos;
             for (int i = 0; i < blockInfos.Length; i++)
             {
                 byte compType = blockInfos[i].GetCompressionType();
@@ -724,18 +731,29 @@ namespace AssetsTools.NET
             return AssetBundleCompressionType.None;
         }
 
+        /// <summary>
+        /// Is the file at the index an <see cref="AssetsFile"/>?
+        /// Note: this checks by reading the first bit of the file instead of reading the directory flag.
+        /// </summary>
+        /// <param name="index">Index of the file in the directory info list.</param>
+        /// <returns>True if the file at the index is an <see cref="AssetsFile"/>.</returns>
         public bool IsAssetsFile(int index)
         {
             GetFileRange(index, out long offset, out long length);
             return AssetsFile.IsAssetsFile(DataReader, offset, length);
         }
 
+        /// <summary>
+        /// Returns the index of the file in the directory list with the given name.
+        /// </summary>
+        /// <param name="name">The name to search for.</param>
+        /// <returns>The index of the file in the directory list or -1 if no file is found.</returns>
         public int GetFileIndex(string name)
         {
             if (Header == null)
                 throw new Exception("Header must be loaded! (Did you forget to call bundle.Read?)");
 
-            for (int i = 0; i < BlockAndDirInfo.DirectoryInfos.Length; i++)
+            for (int i = 0; i < BlockAndDirInfo.DirectoryInfos.Count; i++)
             {
                 if (BlockAndDirInfo.DirectoryInfos[i].Name == name)
                     return i;
@@ -744,28 +762,57 @@ namespace AssetsTools.NET
             return -1;
         }
 
+        /// <summary>
+        /// Returns the name of the file at the index in the directory list.
+        /// </summary>
+        /// <param name="index">The index to look at.</param>
+        /// <returns>The name of the file in the directory list or null if the index is out of bounds.</returns>
         public string GetFileName(int index)
         {
             if (Header == null)
                 throw new Exception("Header must be loaded! (Did you forget to call bundle.Read?)");
 
+            if (index < 0 || index >= BlockAndDirInfo.DirectoryInfos.Count)
+                return null;
+
             return BlockAndDirInfo.DirectoryInfos[index].Name;
         }
 
+        /// <summary>
+        /// Returns the file range of a file.
+        /// Use <see cref="DataReader"/> instead of <see cref="Reader"/> to read data.
+        /// </summary>
+        /// <param name="index">The index to look at.</param>
+        /// <param name="offset">The offset in the data stream, or -1 if the index is out of bounds.</param>
+        /// <param name="length">The length of the file, or 0 if the index is out of bounds.</param>
         public void GetFileRange(int index, out long offset, out long length)
         {
             if (Header == null)
                 throw new Exception("Header must be loaded! (Did you forget to call bundle.Read?)");
+
+            if (index < 0 || index >= BlockAndDirInfo.DirectoryInfos.Count)
+            {
+                offset = -1;
+                length = 0;
+                return;
+            }
 
             AssetBundleDirectoryInfo entry = BlockAndDirInfo.DirectoryInfos[index];
             offset = entry.Offset;
             length = entry.DecompressedSize;
         }
 
+        /// <summary>
+        /// Returns a list of file names in the bundle.
+        /// </summary>
+        /// <returns>The file names in the bundle.</returns>
         public List<string> GetAllFileNames()
         {
+            if (Header == null)
+                throw new Exception("Header must be loaded! (Did you forget to call bundle.Read?)");
+
             List<string> names = new List<string>();
-            AssetBundleDirectoryInfo[] dirInfos = BlockAndDirInfo.DirectoryInfos;
+            List<AssetBundleDirectoryInfo> dirInfos = BlockAndDirInfo.DirectoryInfos;
             foreach (AssetBundleDirectoryInfo dirInfo in dirInfos)
             {
                 names.Add(dirInfo.Name);
@@ -786,6 +833,7 @@ namespace AssetsTools.NET
     {
         None,
         LZMA,
-        LZ4
+        LZ4,
+        LZ4Fast
     }
 }

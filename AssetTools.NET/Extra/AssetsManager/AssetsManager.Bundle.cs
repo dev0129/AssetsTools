@@ -1,12 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.IO;
-using System.Text;
 
 namespace AssetsTools.NET.Extra
 {
     public partial class AssetsManager
     {
+        public static string GetBundleLookupKey(string path)
+        {
+            return Path.GetFullPath(path);
+        }
+
         /// <summary>
         /// Load a <see cref="BundleFileInstance"/> from a stream with a path.
         /// Use the <see cref="FileStream"/> version of this method to skip the path argument.
@@ -20,13 +23,21 @@ namespace AssetsTools.NET.Extra
         public BundleFileInstance LoadBundleFile(Stream stream, string path, bool unpackIfPacked = true)
         {
             BundleFileInstance bunInst;
-            string lookupKey = GetFileLookupKey(path);
+            string lookupKey = GetBundleLookupKey(path);
             if (BundleLookup.TryGetValue(lookupKey, out bunInst))
                 return bunInst;
 
             bunInst = new BundleFileInstance(stream, path, unpackIfPacked);
-            Bundles.Add(bunInst);
-            BundleLookup[lookupKey] = bunInst;
+            lock (BundleLookup)
+            {
+                lock (Bundles)
+                {
+                    BundleLookup[lookupKey] = bunInst;
+                    Bundles.Add(bunInst);
+                }
+            }
+
+            LoadTypeTreeBlobsFromBundle(bunInst);
 
             return bunInst;
         }
@@ -65,7 +76,7 @@ namespace AssetsTools.NET.Extra
         /// <returns>True if the file was found and closed, and false if it wasn't found.</returns>
         public bool UnloadBundleFile(string path)
         {
-            string lookupKey = GetFileLookupKey(path);
+            string lookupKey = GetBundleLookupKey(path);
             if (BundleLookup.TryGetValue(lookupKey, out BundleFileInstance bunInst))
             {
                 bunInst.file.Close();
@@ -75,8 +86,25 @@ namespace AssetsTools.NET.Extra
                     assetsInst.file.Close();
                 }
 
-                Bundles.Remove(bunInst);
-                BundleLookup.Remove(lookupKey);
+                lock (BundleLookup)
+                {
+                    lock (Bundles)
+                    {
+                        Bundles.Remove(bunInst);
+                        BundleLookup.Remove(lookupKey);
+                    }
+                }
+
+                if (typeTreeBlobOwners.TryGetValue(bunInst, out HashSet<Hash128> typeBlobHashes))
+                {
+                    foreach (Hash128 typeBlobHash in typeBlobHashes)
+                    {
+                        typeBlobHashes.Remove(typeBlobHash);
+                    }
+
+                    typeTreeBlobOwners.Remove(bunInst);
+                }
+
                 return true;
             }
             return false;
@@ -100,9 +128,26 @@ namespace AssetsTools.NET.Extra
 
             if (Bundles.Contains(bunInst))
             {
-                string lookupKey = GetFileLookupKey(bunInst.path);
-                BundleLookup.Remove(lookupKey);
-                Bundles.Remove(bunInst);
+                string lookupKey = GetBundleLookupKey(bunInst.path);
+                lock (BundleLookup)
+                {
+                    lock (Bundles)
+                    {
+                        Bundles.Remove(bunInst);
+                        BundleLookup.Remove(lookupKey);
+                    }
+                }
+
+                if (typeTreeBlobOwners.TryGetValue(bunInst, out HashSet<Hash128> typeBlobHashes))
+                {
+                    foreach (Hash128 typeBlobHash in typeBlobHashes)
+                    {
+                        typeTreeBlobs.Remove(typeBlobHash);
+                    }
+
+                    typeTreeBlobOwners.Remove(bunInst);
+                }
+
                 return true;
             }
 
@@ -128,11 +173,39 @@ namespace AssetsTools.NET.Extra
 
                     bunInst.loadedAssetsFiles.Clear();
                 }
-                Bundles.Clear();
-                BundleLookup.Clear();
+
+                lock (BundleLookup)
+                {
+                    lock (Bundles)
+                    {
+                        Bundles.Clear();
+                        BundleLookup.Clear();
+                    }
+                }
+
+                typeTreeBlobs.Clear();
+                typeTreeBlobOwners.Clear();
+
                 return true;
             }
             return false;
+        }
+
+        private bool IsAssetsFilePreviewSafe(BundleFileInstance bunInst, int index)
+        {
+            AssetBundleDirectoryInfo dirInfo = BundleHelper.GetDirInfo(bunInst.file, index);
+            if (dirInfo.IsReplacerPreviewable)
+            {
+                Stream previewStream = dirInfo.Replacer.GetPreviewStream();
+                lock (previewStream)
+                {
+                    return AssetsFile.IsAssetsFile(new AssetsFileReader(previewStream), 0, previewStream.Length);
+                }
+            }
+            else
+            {
+                return bunInst.file.IsAssetsFile(index);
+            }
         }
 
         /// <summary>
@@ -149,11 +222,15 @@ namespace AssetsTools.NET.Extra
 
             if (!FileLookup.TryGetValue(assetLookupKey, out AssetsFileInstance fileInst))
             {
-                if (bunInst.file.IsAssetsFile(index))
+                if (IsAssetsFilePreviewSafe(bunInst, index))
                 {
                     bunInst.file.GetFileRange(index, out long offset, out long length);
-                    SegmentStream stream = new SegmentStream(bunInst.DataStream, offset, length);
-                    AssetsFileInstance assetsInst = LoadAssetsFile(stream, assetMemPath, loadDeps, bunInst: bunInst);
+                    AssetsFileInstance assetsInst;
+                    lock (bunInst.file.DataReader)
+                    {
+                        SegmentStream stream = new SegmentStream(bunInst.DataStream, offset, length);
+                        assetsInst = LoadAssetsFile(stream, assetMemPath, loadDeps, bunInst: bunInst);
+                    }
                     bunInst.loadedAssetsFiles.Add(assetsInst);
                     return assetsInst;
                 }

@@ -32,95 +32,150 @@ namespace AssetsTools.NET.Extra
             AssetsFileInstance inst, AssetFileInfo info,
             AssetReadFlags readFlags = AssetReadFlags.None)
         {
-            long absFilePos = info.AbsoluteByteStart;
-            ushort scriptIndex = inst.file.GetScriptIndex(info);
-            return GetTemplateBaseField(inst, inst.file.Reader, absFilePos, info.TypeId, scriptIndex, readFlags);
+            ushort scriptIndex = info.GetScriptIndex(inst.file);
+            if (info.ReplacerType != ContentReplacerType.AddOrModify)
+            {
+                long absFilePos = info.GetAbsoluteByteOffset(inst.file);
+                return GetTemplateBaseField(inst, inst.file.Reader, absFilePos, info.TypeId, scriptIndex, readFlags);
+            }
+            else
+            {
+                if (info.Replacer.HasPreview())
+                {
+                    Stream stream = info.Replacer.GetPreviewStream();
+                    AssetsFileReader reader = new AssetsFileReader(stream);
+                    return GetTemplateBaseField(inst, reader, 0, info.TypeId, scriptIndex, readFlags);
+                }
+                else
+                {
+                    return GetTemplateBaseField(inst, null, 0, info.TypeId, scriptIndex, readFlags);
+                }
+            }
         }
 
         public AssetTypeTemplateField GetTemplateBaseField(
             AssetsFileInstance inst, AssetsFileReader reader, long absByteStart,
             int typeId, ushort scriptIndex, AssetReadFlags readFlags)
         {
-            AssetsFile file = inst.file;
             AssetTypeTemplateField baseField = null;
-            bool hasTypeTree = inst.file.Metadata.TypeTreeEnabled;
 
-            bool preferEditor = Net35Polyfill.HasFlag(readFlags, AssetReadFlags.PreferEditor);
-            bool forceFromCldb = Net35Polyfill.HasFlag(readFlags, AssetReadFlags.ForceFromCldb);
-            bool skipMonoBehaviourFields = Net35Polyfill.HasFlag(readFlags, AssetReadFlags.SkipMonoBehaviourFields);
-
-            if (UseTemplateFieldCache && typeId != (int)AssetClassID.MonoBehaviour && templateFieldCache.TryGetValue(typeId, out baseField))
+            // if non-monobehaviour type is in cache, return the cached item
+            bool isMonoBehaviourTypeId = typeId == (int)AssetClassID.MonoBehaviour || typeId < 0;
+            if (UseTemplateFieldCache && !isMonoBehaviourTypeId && templateFieldCache.TryGetValue(typeId, out baseField))
             {
                 return baseField;
             }
 
-            if (hasTypeTree && !forceFromCldb)
+            AssetsFile file = inst.file;
+            bool hasTypeTree = file.Metadata.TypeTreeEnabled;
+            bool forceFromCldb = Net35Polyfill.HasFlag(readFlags, AssetReadFlags.ForceFromCldb);
+
+            // if there's a type tree AND we aren't forcing from a class database
+            // (with the condition that we actually have a class database) then
+            // load from that instead
+            if (hasTypeTree && (!forceFromCldb || ClassDatabase == null))
             {
-                if (UseMonoTemplateFieldCache && typeId == (int)AssetClassID.MonoBehaviour)
+                if (UseMonoTemplateFieldCache && isMonoBehaviourTypeId)
                 {
-                    if (monoTypeTreeTemplateFieldCache.TryGetValue(inst, out Dictionary<ushort, AssetTypeTemplateField> templates) &&
-                        templates.TryGetValue(scriptIndex, out AssetTypeTemplateField template))
+                    if (monoTypeTreeTemplateFieldCache.TryGetValue(inst, out ConcurrentDictionary<ushort, AssetTypeTemplateField> templates) &&
+                        templates.TryGetValue(scriptIndex, out baseField))
                     {
-                        return template;
+                        return baseField;
                     }
                 }
 
                 TypeTreeType ttType = file.Metadata.FindTypeTreeTypeByID(typeId, scriptIndex);
-                if (ttType != null && ttType.Nodes.Count > 0)
+                if (ttType != null && (ttType.Nodes.Count > 0 || !ttType.TypeBlobIsDefinition))
                 {
-                    baseField = new AssetTypeTemplateField();
-                    baseField.FromTypeTree(ttType);
-
-                    if (UseTemplateFieldCache && typeId != (int)AssetClassID.MonoBehaviour)
+                    baseField = null;
+                    if (ttType.TypeBlobIsDefinition)
                     {
-                        templateFieldCache[typeId] = baseField;
+                        baseField = new AssetTypeTemplateField();
+                        baseField.FromTypeTree(ttType);
                     }
-                    else if (UseMonoTemplateFieldCache && typeId == (uint)AssetClassID.MonoBehaviour)
+                    else
                     {
-                        if (!monoTypeTreeTemplateFieldCache.TryGetValue(inst, out Dictionary<ushort, AssetTypeTemplateField> templates))
+                        Hash128 typeBlobHash = ttType.ExtTypeHash;
+                        TypeTreeBlob typeBlob = GetTypeBlob(typeBlobHash);
+                        if (typeBlob != null)
                         {
-                            monoTypeTreeTemplateFieldCache[inst] = templates = new Dictionary<ushort, AssetTypeTemplateField>();
+                            baseField = new AssetTypeTemplateField();
+                            baseField.FromTypeBlob(typeBlob);
                         }
-                        templates[scriptIndex] = baseField;
                     }
 
-                    return baseField;
+                    if (baseField != null)
+                    {
+                        if (UseTemplateFieldCache && !isMonoBehaviourTypeId)
+                        {
+                            templateFieldCache[typeId] = baseField;
+                        }
+                        else if (UseMonoTemplateFieldCache && isMonoBehaviourTypeId)
+                        {
+                            if (!monoTypeTreeTemplateFieldCache.TryGetValue(inst, out ConcurrentDictionary<ushort, AssetTypeTemplateField> templates))
+                            {
+                                monoTypeTreeTemplateFieldCache[inst] = templates = new ConcurrentDictionary<ushort, AssetTypeTemplateField>();
+                            }
+                            templates[scriptIndex] = baseField;
+                        }
+
+                        return baseField;
+                    }
                 }
             }
 
-            if (UseTemplateFieldCache && UseMonoTemplateFieldCache && typeId == (int)AssetClassID.MonoBehaviour)
+            // if we cached a monobehaviour from a class database, clone a copy
+            if (UseTemplateFieldCache && isMonoBehaviourTypeId)
             {
-                if (templateFieldCache.TryGetValue(typeId, out baseField))
+                if (templateFieldCache.TryGetValue((int)AssetClassID.MonoBehaviour, out baseField))
                 {
                     baseField = baseField.Clone();
                 }
             }
 
+            // if we haven't got the basefield yet, the only option left is
+            // the class database. if it's not there or the database isn't
+            // loaded, we're out of luck.
             if (baseField == null)
             {
-                ClassDatabaseType cldbType = ClassDatabase.FindAssetClassByID(typeId);
+                if (ClassDatabase == null)
+                {
+                    return null;
+                }
+
+                int fixedTypeId = isMonoBehaviourTypeId ? (int)AssetClassID.MonoBehaviour : typeId;
+
+                ClassDatabaseType cldbType = ClassDatabase.FindAssetClassByID(fixedTypeId);
                 if (cldbType == null)
                 {
                     return null;
                 }
+
+                bool preferEditor = Net35Polyfill.HasFlag(readFlags, AssetReadFlags.PreferEditor);
 
                 baseField = new AssetTypeTemplateField();
                 baseField.FromClassDatabase(ClassDatabase, cldbType, preferEditor);
 
                 if (UseTemplateFieldCache)
                 {
-                    if (typeId == (int)AssetClassID.MonoBehaviour)
+                    if (fixedTypeId == (int)AssetClassID.MonoBehaviour)
                     {
-                        templateFieldCache[typeId] = baseField.Clone();
+                        templateFieldCache[fixedTypeId] = baseField.Clone();
                     }
                     else
                     {
-                        templateFieldCache[typeId] = baseField;
+                        templateFieldCache[fixedTypeId] = baseField;
                     }
                 }
             }
 
-            if (typeId == (int)AssetClassID.MonoBehaviour && MonoTempGenerator != null && !skipMonoBehaviourFields)
+            // we need to generate the monobehaviour fields from a mono temp
+            // generator. this requires parsing the base monobehaviour so we
+            // can get the monoscript (we could also use the script index
+            // but this is safer) and then passing the script from there to
+            // the temp generator. we then append those fields to the base.
+            bool skipMonoBehaviourFields = Net35Polyfill.HasFlag(readFlags, AssetReadFlags.SkipMonoBehaviourFields);
+            if (isMonoBehaviourTypeId && MonoTempGenerator != null && !skipMonoBehaviourFields && reader != null)
             {
                 AssetTypeValueField mbBaseField = baseField.MakeValue(reader, absByteStart);
                 AssetPPtr msPtr = AssetPPtr.FromField(mbBaseField["m_Script"]);
@@ -149,14 +204,14 @@ namespace AssetsTools.NET.Extra
                         }
                         else
                         {
-                            monoCldbTemplateFieldCache[monoScriptFile] = templates = new Dictionary<long, AssetTypeTemplateField>();
+                            monoCldbTemplateFieldCache[monoScriptFile] = templates = new ConcurrentDictionary<long, AssetTypeTemplateField>();
                         }
                     }
 
                     AssetFileInfo monoScriptInfo = monoScriptFile.file.GetAssetInfo(msPtr.PathId);
-                    long monoScriptAbsFilePos = monoScriptInfo.AbsoluteByteStart;
+                    long monoScriptAbsFilePos = monoScriptInfo.GetAbsoluteByteOffset(monoScriptFile.file);
                     int monoScriptTypeId = monoScriptInfo.TypeId;
-                    ushort monoScriptScriptIndex = monoScriptFile.file.GetScriptIndex(monoScriptInfo);
+                    ushort monoScriptScriptIndex = monoScriptInfo.GetScriptIndex(monoScriptFile.file);
 
                     bool success = GetMonoScriptInfo(
                         monoScriptFile, monoScriptAbsFilePos, monoScriptTypeId, monoScriptScriptIndex,
@@ -218,8 +273,15 @@ namespace AssetsTools.NET.Extra
             if (templateField == null)
                 return false;
 
-            inst.file.Reader.Position = absFilePos;
-            AssetTypeValueField valueField = templateField.MakeValue(inst.file.Reader);
+            // this should be pretty fast, but you never know I guess.
+            // might want to move the save to byte array pattern into
+            // a new function at some point...
+            AssetTypeValueField valueField;
+            lock (inst.LockReader)
+            {
+                inst.file.Reader.Position = absFilePos;
+                valueField = templateField.MakeValue(inst.file.Reader);
+            }
             assemblyName = valueField["m_AssemblyName"].AsString;
             nameSpace = valueField["m_Namespace"].AsString;
             className = valueField["m_ClassName"].AsString;
@@ -238,7 +300,7 @@ namespace AssetsTools.NET.Extra
             }
             else
             {
-                if (id != 0x72 || scriptIndex == 0xffff)
+                if ((id != (int)AssetClassID.MonoBehaviour && id >= 0) || scriptIndex == 0xffff)
                 {
                     var cldbType = ClassDatabase.FindAssetClassByID(id);
                     templateField.FromClassDatabase(ClassDatabase, cldbType);
@@ -277,7 +339,31 @@ namespace AssetsTools.NET.Extra
         {
             AssetTypeTemplateField tempField = GetTemplateBaseField(inst, info, readFlags);
             RefTypeManager refMan = GetRefTypeManager(inst);
-            AssetTypeValueField valueField = tempField.MakeValue(inst.file.Reader, info.AbsoluteByteStart, refMan);
+
+            AssetTypeValueField valueField;
+            if (info.IsReplacerPreviewable)
+            {
+                // probably not the best idea to lock this stream,
+                // but how many times will we be reading the same
+                // asset at the same time?
+                Stream previewStream = info.Replacer.GetPreviewStream();
+                lock (previewStream)
+                {
+                    valueField = tempField.MakeValue(new AssetsFileReader(previewStream), 0, refMan);
+                }
+            }
+            else
+            {
+                using MemoryStream assetDataStream = new MemoryStream((int)info.ByteSize);
+                lock (inst.LockReader)
+                {
+                    AssetsFileReader reader = inst.file.Reader;
+                    reader.Position = info.GetAbsoluteByteOffset(inst.file);
+                    reader.BaseStream.CopyToCompat(assetDataStream, info.ByteSize);
+                }
+                assetDataStream.Position = 0;
+                valueField = tempField.MakeValue(new AssetsFileReader(assetDataStream), 0, refMan);
+            }
             return valueField;
         }
 

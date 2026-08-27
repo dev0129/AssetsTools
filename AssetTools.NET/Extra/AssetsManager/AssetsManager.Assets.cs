@@ -1,16 +1,12 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Runtime.InteropServices.ComTypes;
-using System.Text;
+﻿using System.IO;
 
 namespace AssetsTools.NET.Extra
 {
     public partial class AssetsManager
     {
-        internal string GetFileLookupKey(string path)
+        public static string GetFileLookupKey(string path)
         {
-            return Path.GetFullPath(path).ToLower();
+            return Path.GetFileName(path).ToLower();
         }
 
         private void LoadAssetsFileDependencies(AssetsFileInstance fileInst, string path, BundleFileInstance bunInst)
@@ -51,7 +47,7 @@ namespace AssetsTools.NET.Extra
         /// <param name="loadDeps">Load all dependencies immediately?</param>
         /// <param name="bunInst">The parent bundle, if one exists.</param>
         /// <returns>The loaded <see cref="AssetsFileInstance"/>.</returns>
-        public AssetsFileInstance LoadAssetsFile(Stream stream, string path, bool loadDeps, BundleFileInstance bunInst = null)
+        public AssetsFileInstance LoadAssetsFile(Stream stream, string path, bool loadDeps = false, BundleFileInstance bunInst = null)
         {
             string lookupKey = GetFileLookupKey(path);
             if (FileLookup.TryGetValue(lookupKey, out AssetsFileInstance fileInst))
@@ -71,19 +67,21 @@ namespace AssetsTools.NET.Extra
         /// <summary>
         /// Load an <see cref="AssetsFileInstance"/> from a stream.
         /// Assigns the <see cref="AssetsFileInstance"/>'s path from the stream's file path.
+        /// If a file with that name is already loaded, it will be returned instead.
         /// </summary>
         /// <param name="stream">The stream to read from.</param>
         /// <param name="loadDeps">Load all dependencies immediately?</param>
         /// <returns>The loaded <see cref="AssetsFileInstance"/>.</returns>
         public AssetsFileInstance LoadAssetsFile(FileStream stream, bool loadDeps = false)
         {
-            return LoadAssetsFileCacheless(stream, stream.Name, loadDeps);
+            return LoadAssetsFile(stream, stream.Name, loadDeps);
         }
 
         /// <summary>
         /// Load an <see cref="AssetsFileInstance"/> from a path.
         /// If a file with that name is already loaded, it will be returned instead.
         /// </summary>
+        /// <param name="file">The assets file to use.</param>
         /// <param name="path">The path of the file to read from.</param>
         /// <param name="loadDeps">Load all dependencies immediately?</param>
         /// <returns>The loaded <see cref="AssetsFileInstance"/>.</returns>
@@ -93,7 +91,7 @@ namespace AssetsTools.NET.Extra
             if (FileLookup.TryGetValue(lookupKey, out AssetsFileInstance fileInst))
                 return fileInst;
 
-            return LoadAssetsFile(File.OpenRead(path), loadDeps);
+            return LoadAssetsFileCacheless(file, path, loadDeps);
         }
 
         /// <summary>
@@ -106,12 +104,18 @@ namespace AssetsTools.NET.Extra
             string lookupKey = GetFileLookupKey(path);
             if (FileLookup.TryGetValue(lookupKey, out AssetsFileInstance fileInst))
             {
-                monoTypeTreeTemplateFieldCache.Remove(fileInst);
-                monoCldbTemplateFieldCache.Remove(fileInst);
-                refTypeManagerCache.Remove(fileInst);
+                monoTypeTreeTemplateFieldCache.TryRemove(fileInst, out _);
+                monoCldbTemplateFieldCache.TryRemove(fileInst, out _);
+                refTypeManagerCache.TryRemove(fileInst, out _);
 
-                Files.Remove(fileInst);
-                FileLookup.Remove(lookupKey);
+                lock (FileLookup)
+                {
+                    lock (Files)
+                    {
+                        Files.Remove(fileInst);
+                        FileLookup.Remove(lookupKey);
+                    }
+                }
                 fileInst.file.Close();
                 return true;
             }
@@ -129,13 +133,19 @@ namespace AssetsTools.NET.Extra
 
             if (Files.Contains(fileInst))
             {
-                monoTypeTreeTemplateFieldCache.Remove(fileInst);
-                monoCldbTemplateFieldCache.Remove(fileInst);
-                refTypeManagerCache.Remove(fileInst);
+                monoTypeTreeTemplateFieldCache.TryRemove(fileInst, out _);
+                monoCldbTemplateFieldCache.TryRemove(fileInst, out _);
+                refTypeManagerCache.TryRemove(fileInst, out _);
 
                 string lookupKey = GetFileLookupKey(fileInst.path);
-                FileLookup.Remove(lookupKey);
-                Files.Remove(fileInst);
+                lock (FileLookup)
+                {
+                    lock (Files)
+                    {
+                        FileLookup.Remove(lookupKey);
+                        Files.Remove(fileInst);
+                    }
+                }
                 return true;
             }
 
@@ -145,7 +155,7 @@ namespace AssetsTools.NET.Extra
         /// <summary>
         /// Unload all <see cref="AssetsFileInstance"/>s.
         /// </summary>
-        /// <param name="clearCache">Clear the cache? Recommended if you plan on reopening files later.</param>
+        /// <param name="clearCache">Clear the cache? Cache is recommended if you plan on reopening files later.</param>
         /// <returns>True if there are files that can be cleared, and false if no files are loaded.</returns>
         public bool UnloadAllAssetsFiles(bool clearCache = false)
         {
@@ -165,8 +175,14 @@ namespace AssetsTools.NET.Extra
                 {
                     assetsInst.file.Close();
                 }
-                Files.Clear();
-                FileLookup.Clear();
+                lock (FileLookup)
+                {
+                    lock (Files)
+                    {
+                        Files.Clear();
+                        FileLookup.Clear();
+                    }
+                }
                 return true;
             }
             return false;

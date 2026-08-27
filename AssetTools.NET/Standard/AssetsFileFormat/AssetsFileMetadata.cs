@@ -1,5 +1,4 @@
 ﻿using AssetsTools.NET.Extra;
-using System;
 using System.Collections.Generic;
 
 namespace AssetsTools.NET
@@ -23,10 +22,10 @@ namespace AssetsTools.NET
         /// </summary>
         public List<TypeTreeType> TypeTreeTypes { get; set; }
         /// <summary>
-        /// List of asset infos. Do not modify this directly. Instead, use
-        /// <see cref="AssetsFile.Write(AssetsFileWriter, long, List{AssetsReplacer}, ClassDatabaseFile)"/>.
+        /// List of asset infos. Do not add or remove from this list directly, instead use the
+        /// <see cref="AddAssetInfo(AssetFileInfo)"/> or <see cref="RemoveAssetInfo(AssetFileInfo)"/> methods.
         /// </summary>
-        public List<AssetFileInfo> AssetInfos { get; set; }
+        public IList<AssetFileInfo> AssetInfos { get; set; }
         /// <summary>
         /// List of script type pointers. This list should match up with ScriptTypeIndex in the type
         /// tree types list.
@@ -45,7 +44,7 @@ namespace AssetsTools.NET
         /// </summary>
         public string UserInformation { get; set; }
 
-        private Dictionary<long, int> _quickLookup = null;
+        private Dictionary<long, AssetFileInfo> _quickLookup = null;
 
         /// <summary>
         /// Read the <see cref="AssetsFileMetadata"/> with the provided reader and file header.
@@ -54,28 +53,15 @@ namespace AssetsTools.NET
         /// <param name="header">The header to use.</param>
         public void Read(AssetsFileReader reader, AssetsFileHeader header)
         {
-            Read(reader, header.Version, header.DataOffset);
+            Read(reader, header.Version);
         }
 
         /// <summary>
         /// Read the <see cref="AssetsFileMetadata"/> with the provided reader and format version.
-        /// This version is not recommended since no data offset is provided, so
-        /// <see cref="AssetFileInfo.AbsoluteByteStart"/> is not set.
         /// </summary>
         /// <param name="reader">The reader to use.</param>
         /// <param name="version">The version of the file.</param>
         public void Read(AssetsFileReader reader, uint version)
-        {
-            Read(reader, version, -1);
-        }
-
-        /// <summary>
-        /// Read the <see cref="AssetsFileMetadata"/> with the provided reader and format version.
-        /// </summary>
-        /// <param name="reader">The reader to use.</param>
-        /// <param name="version">The version of the file.</param>
-        /// <param name="dataOffset">The version of the file.</param>
-        public void Read(AssetsFileReader reader, uint version, long dataOffset)
         {
             _quickLookup = null;
 
@@ -105,10 +91,6 @@ namespace AssetsTools.NET
 
                 // todo, check correct version
                 fileInfo.TypeId = fileInfo.GetTypeId(this, version);
-                if (dataOffset != -1)
-                {
-                    fileInfo.AbsoluteByteStart = fileInfo.GetAbsoluteByteStart(dataOffset);
-                }
 
                 AssetInfos.Add(fileInfo);
             }
@@ -171,14 +153,14 @@ namespace AssetsTools.NET
             {
                 TypeTreeTypes[i].Write(writer, version, TypeTreeEnabled);
             }
-            
+
             writer.Write(AssetInfos.Count);
             writer.Align();
             for (int i = 0; i < AssetInfos.Count; i++)
             {
                 AssetInfos[i].Write(writer, version);
             }
-            
+
             writer.Write(ScriptTypes.Count);
             for (int i = 0; i < ScriptTypes.Count; i++)
             {
@@ -186,7 +168,7 @@ namespace AssetsTools.NET
                 writer.Align(); // only align after fileId
                 writer.Write(ScriptTypes[i].PathId);
             }
-            
+
             writer.Write(Externals.Count);
             for (int i = 0; i < Externals.Count; i++)
             {
@@ -219,7 +201,7 @@ namespace AssetsTools.NET
             {
                 if (_quickLookup.ContainsKey(pathId))
                 {
-                    return AssetInfos[_quickLookup[pathId]];
+                    return _quickLookup[pathId];
                 }
             }
             else
@@ -237,16 +219,46 @@ namespace AssetsTools.NET
         }
 
         /// <summary>
+        /// Adds an <see cref="AssetFileInfo"/> to the info list.
+        /// </summary>
+        /// <param name="info">The info to add</param>
+        public void AddAssetInfo(AssetFileInfo info)
+        {
+            if (_quickLookup != null)
+            {
+                _quickLookup[info.PathId] = info;
+            }
+            AssetInfos.Add(info);
+        }
+
+        /// <summary>
+        /// Removes an <see cref="AssetFileInfo"/> from the info list.
+        /// </summary>
+        /// <remarks>
+        /// It is suggested to set <see cref="AssetFileInfo.Replacer"/> to
+        /// <see cref="ContentRemover"/> if you want to keep the info in the list but save without it.
+        /// </remarks>
+        /// <param name="info">The info to remove</param>
+        public bool RemoveAssetInfo(AssetFileInfo info)
+        {
+            if (_quickLookup != null)
+            {
+                _quickLookup.Remove(info.PathId);
+            }
+            return AssetInfos.Remove(info);
+        }
+
+        /// <summary>
         /// Generate a dictionary lookup for assets instead of a brute force search.
         /// Takes a little bit more memory but results in quicker lookups.
         /// </summary>
         public void GenerateQuickLookup()
         {
-            _quickLookup = new Dictionary<long, int>();
+            _quickLookup = new Dictionary<long, AssetFileInfo>();
             for (int i = 0; i < AssetInfos.Count; i++)
             {
                 AssetFileInfo info = AssetInfos[i];
-                _quickLookup[info.PathId] = i;
+                _quickLookup[info.PathId] = info;
             }
         }
 
@@ -270,17 +282,17 @@ namespace AssetsTools.NET
 
         /// <summary>
         /// Get all assets of a specific type ID and script index. The script index of an asset can be
-        /// found from <see cref="AssetsFile.GetScriptIndex(AssetFileInfo)"/> or <see cref="ScriptTypes"/>.
+        /// found from <see cref="AssetFileInfo.GetScriptIndex(AssetsFile)"/> or <see cref="ScriptTypes"/>.
         /// </summary>
         /// <param name="typeId">The type ID to search for.</param>
-        /// <param name="scriptIndex">The script index to search for.</param>
+        /// <param name="scriptIndex">The script index to search for, or <see cref="ushort.MaxValue"/> for any.</param>
         /// <returns>A list of infos for that type ID and script index.</returns>
         public List<AssetFileInfo> GetAssetsOfType(int typeId, ushort scriptIndex)
         {
             List<AssetFileInfo> infos = new List<AssetFileInfo>();
             foreach (AssetFileInfo info in AssetInfos)
             {
-                if (scriptIndex != 0xffff)
+                if (scriptIndex != ushort.MaxValue)
                 {
                     if (info.TypeId < 0)
                     {
@@ -292,7 +304,14 @@ namespace AssetsTools.NET
                     }
                     else if (info.TypeId == (int)AssetClassID.MonoBehaviour)
                     {
-                        if (FindTypeTreeTypeByID(info.TypeId, info.ScriptTypeIndex).ScriptTypeIndex != scriptIndex)
+                        // we don't have access to the metadata or format version
+                        // in this function. let's double check this is ver >= 16.
+                        if (info.TypeIdOrIndex == info.TypeId)
+                            continue;
+
+                        // we've confirmed at this point we're not ver < 16. if we
+                        // were, we should have had TypeId < 0
+                        if (info.GetScriptIndex(this, 16) != scriptIndex)
                             continue;
 
                         if (typeId != (int)AssetClassID.MonoBehaviour)
@@ -313,7 +332,7 @@ namespace AssetsTools.NET
             }
             return infos;
         }
-        
+
         /// <summary>
         /// Get all assets of a specific type ID.
         /// </summary>
@@ -326,7 +345,7 @@ namespace AssetsTools.NET
 
         /// <summary>
         /// Get all assets of a specific type ID and script index. The script index of an asset can be
-        /// found from <see cref="AssetsFile.GetScriptIndex(AssetFileInfo)"/> or <see cref="ScriptTypes"/>.
+        /// found from <see cref="AssetFileInfo.GetScriptIndex(AssetsFile)"/> or <see cref="ScriptTypes"/>.
         /// </summary>
         /// <param name="typeId">The type ID to search for.</param>
         /// <param name="scriptIndex">The script index to search for.</param>
@@ -353,7 +372,7 @@ namespace AssetsTools.NET
 
         /// <summary>
         /// Get the type tree type by type ID and script index. The script index of an asset can be
-        /// found from <see cref="AssetsFile.GetScriptIndex(AssetFileInfo)"/> or <see cref="ScriptTypes"/>.
+        /// found from <see cref="AssetFileInfo.GetScriptIndex(AssetsFile)"/> or <see cref="ScriptTypes"/>.
         /// For games before 5.5, <paramref name="scriptIndex"/> is ignored since this data is read
         /// from the negative value of <paramref name="id"/>. In 5.5 and later, MonoBehaviours are always
         /// 0x72, so <paramref name="scriptIndex"/> is used instead.
@@ -380,8 +399,37 @@ namespace AssetsTools.NET
         }
 
         /// <summary>
+        /// Get the type tree type index by type ID and script index. The script index of an asset can be
+        /// found from <see cref="AssetFileInfo.GetScriptIndex(AssetsFile)"/> or <see cref="ScriptTypes"/>.
+        /// For games before 5.5, <paramref name="scriptIndex"/> is ignored since this data is read
+        /// from the negative value of <paramref name="id"/>. In 5.5 and later, MonoBehaviours are always
+        /// 0x72, so <paramref name="scriptIndex"/> is used instead.
+        /// </summary>
+        /// <param name="id">The type ID to search for.</param>
+        /// <param name="scriptIndex">The script index to search for.</param>
+        /// <returns>The type tree type index with this ID and script index, or -1 if not found.</returns>
+        public int FindTypeTreeTypeIndexByID(int id, ushort scriptIndex)
+        {
+            int typeCount = TypeTreeTypes.Count;
+            for (int i = 0; i < typeCount; i++)
+            {
+                TypeTreeType type = TypeTreeTypes[i];
+                if (type.TypeId == id)
+                {
+                    // 5.5+ monobehaviours and 5.4- any other asset
+                    if (type.ScriptTypeIndex == scriptIndex)
+                        return i;
+                    // 5.4- monobehaviours (script index cannot be trusted in this version, so ignore it)
+                    if (id < 0 && type.ScriptTypeIndex == 0xffff)
+                        return i;
+                }
+            }
+            return -1;
+        }
+
+        /// <summary>
         /// Get the type tree type by script index. The script index of an asset can be
-        /// found from <see cref="AssetsFile.GetScriptIndex(AssetFileInfo)"/> or <see cref="ScriptTypes"/>.
+        /// found from <see cref="AssetFileInfo.GetScriptIndex(AssetsFile)"/> or <see cref="ScriptTypes"/>.
         /// </summary>
         /// <param name="scriptIndex">The script index to search for.</param>
         /// <returns>The type tree type with this script index.</returns>
@@ -404,7 +452,10 @@ namespace AssetsTools.NET
         {
             foreach (TypeTreeType type in TypeTreeTypes)
             {
-                if (type.Nodes[0].GetTypeString(type.StringBuffer) == name)
+                if (type.Nodes.Count == 0)
+                    continue;
+
+                if (type.Nodes[0].GetTypeString(type.StringBufferBytes) == name)
                     return type;
             }
             return null;
@@ -423,6 +474,48 @@ namespace AssetsTools.NET
                     return type;
             }
             return null;
+        }
+
+        /// <summary>
+        /// Get the maximum size of this metadata.
+        /// </summary>
+        /// <param name="version">The version of the file.</param>
+        public long GetSize(uint version)
+        {
+            long size = 0;
+            size += UnityVersion.Length + 1;
+            size += 4;
+            if (version >= 13)
+                size += 1;
+
+            size += 4;
+            for (int i = 0; i < TypeTreeTypes.Count; i++)
+                size += TypeTreeTypes[i].GetSize(version, TypeTreeEnabled);
+
+            size += 4;
+            size = (size + 3) & ~3;
+            size += AssetFileInfo.GetSize(version) * AssetInfos.Count;
+
+            // if we get unity 4- support, this needs to be changed
+            size += 4;
+            size = (size + 3) & ~3;
+            size += 12 * ScriptTypes.Count;
+
+            size += 4;
+            for (int i = 0; i < Externals.Count; i++)
+                size += Externals[i].GetSize();
+
+            if (version >= 20)
+            {
+                size += 4;
+                for (int j = 0; j < RefTypes.Count; j++)
+                    size += RefTypes[j].GetSize(version, TypeTreeEnabled);
+            }
+
+            if (version >= 5)
+                size += UserInformation.Length + 1;
+
+            return size;
         }
     }
 }
